@@ -1,6 +1,5 @@
 use anyhow::Result;
-use globset::{Glob, GlobSetBuilder};
-use ignore::WalkBuilder;
+use ignore::{overrides::OverrideBuilder, WalkBuilder};
 use reflink_copy::reflink_or_copy;
 use std::path::Path;
 
@@ -52,16 +51,19 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     // Create destination directory
     std::fs::create_dir_all(dest)?;
 
-    // Build glob set for exclusions
-    let mut glob_set_builder = GlobSetBuilder::new();
-    for pattern in &options.excludes {
-        glob_set_builder.add(Glob::new(pattern)?);
-    }
-    let glob_set = glob_set_builder.build()?;
-
     // Build walker with standard filters disabled
     let mut builder = WalkBuilder::new(src);
     builder.standard_filters(false);
+
+    // Add exclude patterns using overrides
+    if !options.excludes.is_empty() {
+        let mut overrides = OverrideBuilder::new(src);
+        for pattern in &options.excludes {
+            // Add ! prefix to exclude the pattern
+            overrides.add(&format!("!{pattern}"))?;
+        }
+        builder.overrides(overrides.build()?);
+    }
 
     // Walk the source directory
     for entry in builder.build() {
@@ -73,38 +75,12 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
             continue;
         }
 
-        // Calculate relative path
+        // Calculate relative path and destination path
         let relative_path = path.strip_prefix(src)?;
-
-        // Check if path matches any exclude pattern
-        let mut skip = false;
-
-        // Check the path itself and all its parent components
-        for ancestor in relative_path.ancestors() {
-            if glob_set.is_match(ancestor) {
-                skip = true;
-                break;
-            }
-        }
-
-        // Also check with the path as a directory (append / to match directory patterns)
-        let as_dir = format!("{}/", relative_path.display());
-        if glob_set.is_match(&as_dir) {
-            skip = true;
-        }
-
-        if skip {
-            continue;
-        }
-
-        // Destination path
         let dest_path = dest.join(relative_path);
 
         // Copy file or create directory
-        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-            // Create directory only if we won't skip its contents
-            std::fs::create_dir_all(&dest_path)?;
-        } else if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             // Create parent directories if needed
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -117,6 +93,8 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
                 reflink_or_copy(path, &dest_path)?;
             }
         }
+        // Note: We don't explicitly create directories anymore.
+        // They will be created as needed when copying files.
     }
 
     Ok(())
