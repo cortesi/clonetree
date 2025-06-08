@@ -1,12 +1,44 @@
-use anyhow::Result;
 use ignore::{overrides::OverrideBuilder, WalkBuilder};
 use reflink_copy::reflink_or_copy;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Failed to create directory at {path}: {source}")]
+    CreateDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Failed to copy file from {src} to {dest}: {source}")]
+    Copy {
+        src: PathBuf,
+        dest: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Invalid glob pattern '{pattern}': {source}")]
+    InvalidGlob {
+        pattern: String,
+        #[source]
+        source: ignore::Error,
+    },
+
+    #[error("Operation error: {0}")]
+    Other(String),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Default)]
 pub struct Options {
     globs: Vec<String>,
-    force: bool,
     no_reflink: bool,
 }
 
@@ -17,11 +49,6 @@ impl Options {
 
     pub fn glob<S: Into<String>>(mut self, pattern: S) -> Self {
         self.globs.push(pattern.into());
-        self
-    }
-
-    pub fn force(mut self, force: bool) -> Self {
-        self.force = force;
         self
     }
 
@@ -39,17 +66,11 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     let src = src.as_ref();
     let dest = dest.as_ref();
 
-    // If force is enabled and destination exists, remove it
-    if options.force && dest.exists() {
-        if dest.is_dir() {
-            std::fs::remove_dir_all(dest)?;
-        } else {
-            std::fs::remove_file(dest)?;
-        }
-    }
-
     // Create destination directory
-    std::fs::create_dir_all(dest)?;
+    std::fs::create_dir_all(dest).map_err(|e| Error::CreateDirectory {
+        path: dest.to_path_buf(),
+        source: e,
+    })?;
 
     // Build walker with standard filters disabled
     let mut builder = WalkBuilder::new(src);
@@ -59,14 +80,21 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     if !options.globs.is_empty() {
         let mut overrides = OverrideBuilder::new(src);
         for pattern in &options.globs {
-            overrides.add(pattern)?;
+            overrides.add(pattern).map_err(|e| Error::InvalidGlob {
+                pattern: pattern.clone(),
+                source: e,
+            })?;
         }
-        builder.overrides(overrides.build()?);
+        builder.overrides(
+            overrides
+                .build()
+                .map_err(|e| Error::Other(format!("Failed to build glob overrides: {e}")))?,
+        );
     }
 
     // Walk the source directory
     for entry in builder.build() {
-        let entry = entry?;
+        let entry = entry.map_err(|e| Error::Other(format!("Walk error: {e}")))?;
         let path = entry.path();
 
         // Skip the root directory itself
@@ -75,21 +103,34 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
         }
 
         // Calculate relative path and destination path
-        let relative_path = path.strip_prefix(src)?;
+        let relative_path = path
+            .strip_prefix(src)
+            .map_err(|e| Error::Other(format!("Failed to strip prefix from path: {e}")))?;
         let dest_path = dest.join(relative_path);
 
         // Copy file or create directory
         if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             // Create parent directories if needed
             if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)?;
+                std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirectory {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
             }
 
             // Copy file
             if options.no_reflink {
-                std::fs::copy(path, &dest_path)?;
+                std::fs::copy(path, &dest_path).map_err(|e| Error::Copy {
+                    src: path.to_path_buf(),
+                    dest: dest_path.clone(),
+                    source: e,
+                })?;
             } else {
-                reflink_or_copy(path, &dest_path)?;
+                reflink_or_copy(path, &dest_path).map_err(|e| Error::Copy {
+                    src: path.to_path_buf(),
+                    dest: dest_path.clone(),
+                    source: e,
+                })?;
             }
         }
     }
