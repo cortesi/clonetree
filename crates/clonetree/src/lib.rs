@@ -1,3 +1,45 @@
+//! A library for efficiently cloning directory trees with copy-on-write support.
+//!
+//! This crate provides functionality to clone entire directory structures while
+//! leveraging filesystem-level copy-on-write (CoW) capabilities when available
+//! through reflinks. This can result in significant space savings and improved
+//! performance compared to traditional file copying.
+//!
+//! # Features
+//!
+//! - **Copy-on-Write Support**: Automatically uses reflinks when available on
+//!   supported filesystems (Btrfs, XFS, APFS, etc.)
+//! - **Glob Filtering**: Include or exclude files using glob patterns
+//! - **Efficient Traversal**: Built on the `ignore` crate for fast directory walking
+//! - **Type-Safe Errors**: Comprehensive error handling with descriptive error types
+//!
+//! # Example
+//!
+//! ```no_run
+//! use clonetree::{clone_tree, Options};
+//!
+//! # fn main() -> clonetree::Result<()> {
+//! // Clone a directory tree
+//! let options = Options::new();
+//! clone_tree("/source/path", "/destination/path", &options)?;
+//!
+//! // Clone with glob filters
+//! let options = Options::new()
+//!     .glob("**/*.rs")      // Include only Rust files
+//!     .glob("!target/**");  // Exclude target directory
+//! clone_tree("/source", "/dest", &options)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Validation
+//!
+//! The `clone_tree` function enforces the following constraints:
+//! - Source path must exist and be a directory
+//! - Destination path must not exist
+//!
+//! These constraints are validated before any filesystem operations begin.
+
 use ignore::{overrides::OverrideBuilder, WalkBuilder};
 use reflink_copy::reflink_or_copy;
 use std::path::{Path, PathBuf};
@@ -29,6 +71,15 @@ pub enum Error {
         #[source]
         source: ignore::Error,
     },
+
+    #[error("Destination already exists: {path}")]
+    DestinationExists { path: PathBuf },
+
+    #[error("Source is not a directory: {path}")]
+    SourceNotDirectory { path: PathBuf },
+
+    #[error("Source does not exist: {path}")]
+    SourceNotFound { path: PathBuf },
 
     #[error("Operation error: {0}")]
     Other(String),
@@ -65,6 +116,27 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<()> {
     let src = src.as_ref();
     let dest = dest.as_ref();
+
+    // Validate source exists
+    if !src.exists() {
+        return Err(Error::SourceNotFound {
+            path: src.to_path_buf(),
+        });
+    }
+
+    // Validate source is a directory
+    if !src.is_dir() {
+        return Err(Error::SourceNotDirectory {
+            path: src.to_path_buf(),
+        });
+    }
+
+    // Validate destination does not exist
+    if dest.exists() {
+        return Err(Error::DestinationExists {
+            path: dest.to_path_buf(),
+        });
+    }
 
     // Create destination directory
     std::fs::create_dir_all(dest).map_err(|e| Error::CreateDirectory {
@@ -225,5 +297,48 @@ mod tests {
         assert!(!dest.join("data/debug.log").exists());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_source_not_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("nonexistent");
+        let dest = temp_dir.path().join("dest");
+
+        let opts = Options::new();
+        let result = clone_tree(&src, &dest, &opts);
+
+        assert!(matches!(result, Err(Error::SourceNotFound { .. })));
+    }
+
+    #[test]
+    fn test_source_not_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("file.txt");
+        let dest = temp_dir.path().join("dest");
+
+        // Create source as a file, not a directory
+        fs::write(&src, "content").unwrap();
+
+        let opts = Options::new();
+        let result = clone_tree(&src, &dest, &opts);
+
+        assert!(matches!(result, Err(Error::SourceNotDirectory { .. })));
+    }
+
+    #[test]
+    fn test_destination_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        // Create both source and destination directories
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+
+        let opts = Options::new();
+        let result = clone_tree(&src, &dest, &opts);
+
+        assert!(matches!(result, Err(Error::DestinationExists { .. })));
     }
 }

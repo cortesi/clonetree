@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use clonetree::{clone_tree, Options};
-use std::path::Path;
 
 #[derive(Parser)]
 #[command(
@@ -13,7 +12,7 @@ struct Args {
     /// Source directory to clone
     src: String,
 
-    /// Destination directory (must not exist)
+    /// Destination directory
     dest: String,
 
     /// Match or exclude glob patterns (repeatable)
@@ -32,21 +31,6 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-
-    // Validate source exists and is a directory
-    let src_path = Path::new(&args.src);
-    if !src_path.exists() {
-        anyhow::bail!("Source path '{}' does not exist", args.src);
-    }
-    if !src_path.is_dir() {
-        anyhow::bail!("Source path '{}' is not a directory", args.src);
-    }
-
-    // Validate destination does not exist
-    let dest_path = Path::new(&args.dest);
-    if dest_path.exists() {
-        anyhow::bail!("Destination path '{}' already exists", args.dest);
-    }
 
     // Build options
     let mut options = Options::new().no_reflink(args.no_reflink);
