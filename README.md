@@ -11,10 +11,13 @@ extra space until files diverge.
 ## Highlights
 
 * **Fast copy‑on‑write clone** on APFS, Btrfs, XFS, bcachefs, overlayfs, ReFS…
+
 * **Powered by [`reflink-copy`](https://github.com/cargo-bins/reflink-copy)** for portable block‑cloning.
+
 * **Flexible glob patterns** to include/exclude files (uses `!` prefix for exclusions).
+
 * **Graceful fallback** to `std::fs::copy` when reflinks are unsupported.
-* **Force‑overwrite** option to replace existing destinations.
+
 * **Pure Rust**, no unsafe code, minimal deps.
 
 ---
@@ -24,7 +27,6 @@ extra space until files diverge.
 Clone only Rust source files under `src/` into `./sandbox`, while excluding
 unit tests. This demonstrates the precedence rules from the
 [`ignore`](https://docs.rs/ignore) crate: later patterns override earlier ones.
-
 
 ```rust
 use clonetree::{clone_tree, Options};
@@ -76,6 +78,11 @@ The crate ships with a convenience binary so users can benefit without writing c
 cargo install ctree
 ```
 
+### Semantics
+
+`ctree` copies a directory to a specified destination. The source must be a
+directory, and the destination must not exist. 
+
 ### Basic usage
 
 ```bash
@@ -83,7 +90,6 @@ ctree <SRC> <DEST> [OPTIONS]
 
 OPTIONS:
   -g, --glob <GLOB>      Match or exclude glob (repeatable)
-  -f, --force            Remove DEST if it already exists
       --no-reflink       Disable reflink, perform a regular copy
   -q, --quiet            Suppress progress output
   -h, --help             Show this help
@@ -99,12 +105,12 @@ ctree . ./sandbox \
 
 ---
 
-## Filesystem support matrix 
+## Filesystem support matrix
 
 Via [reflink-copy](https://crates.io/crates/reflink-copy)
 
-| OS / FS                        | Reflink supported  | API used                          | Behaviour          |
-| ------------------------------ | ------------------ | --------------------------------- | ------------------ |
+| OS / FS                        | Reflink supported | API used                          | Behaviour          |
+| ------------------------------ | ----------------- | --------------------------------- | ------------------ |
 | macOS 10.13+ / APFS            | ✅                 | `clonefile(2)`                    | COW clone          |
 | iOS / APFS                     | ✅                 | `clonefile(2)`                    | COW clone          |
 | Linux 6.7+ / Btrfs             | ✅                 | `FICLONE` ioctl                   | COW clone          |
@@ -113,3 +119,4 @@ Via [reflink-copy](https://crates.io/crates/reflink-copy)
 | Linux 5.13+ / overlayfs        | ✅                 | `remap_file_range`                | COW clone          |
 | Windows Server 2016+ / ReFS    | ✅                 | `FSCTL_DUPLICATE_EXTENTS_TO_FILE` | COW clone          |
 | ext4 (Ubuntu/Fedora default)   | ❌                 | –                                 | Byte‑for‑byte copy |
+
