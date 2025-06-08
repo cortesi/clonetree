@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/clonetree",
+    "crates/ctree",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = []
+license = "MIT OR Apache-2.0"
+repository = ""
+
+[workspace.dependencies]
