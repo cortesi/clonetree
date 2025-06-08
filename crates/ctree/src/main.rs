@@ -20,10 +20,6 @@ struct Args {
     #[arg(short = 'g', long = "glob", value_name = "GLOB")]
     globs: Vec<String>,
 
-    /// Disable reflink, perform a regular copy
-    #[arg(long = "no-reflink")]
-    no_reflink: bool,
-
     /// Suppress progress output
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
@@ -33,7 +29,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Build options
-    let mut options = Options::new().no_reflink(args.no_reflink);
+    let mut options = Options::new();
     for glob in args.globs {
         options = options.glob(glob);
     }
@@ -41,9 +37,6 @@ fn main() -> Result<()> {
     // Show progress message if not quiet
     if !args.quiet {
         println!("Cloning '{}' to '{}'...", args.src, args.dest);
-        if args.no_reflink {
-            println!("Using regular file copy (reflink disabled)");
-        }
     }
 
     // Perform the clone

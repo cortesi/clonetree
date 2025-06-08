@@ -90,7 +90,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Default)]
 pub struct Options {
     globs: Vec<String>,
-    no_reflink: bool,
 }
 
 impl Options {
@@ -103,10 +102,6 @@ impl Options {
         self
     }
 
-    pub fn no_reflink(mut self, no_reflink: bool) -> Self {
-        self.no_reflink = no_reflink;
-        self
-    }
 }
 
 pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -190,20 +185,12 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
                 })?;
             }
 
-            // Copy file
-            if options.no_reflink {
-                std::fs::copy(path, &dest_path).map_err(|e| Error::Copy {
-                    src: path.to_path_buf(),
-                    dest: dest_path.clone(),
-                    source: e,
-                })?;
-            } else {
-                reflink_or_copy(path, &dest_path).map_err(|e| Error::Copy {
-                    src: path.to_path_buf(),
-                    dest: dest_path.clone(),
-                    source: e,
-                })?;
-            }
+            // Copy file using reflink when available
+            reflink_or_copy(path, &dest_path).map_err(|e| Error::Copy {
+                src: path.to_path_buf(),
+                dest: dest_path.clone(),
+                source: e,
+            })?;
         }
     }
 
