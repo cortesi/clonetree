@@ -29,8 +29,8 @@ use clonetree::{clone_tree, Options};
 
 fn main() -> anyhow::Result<()> {
     let opts = Options::new()
-        .exclude(".git/**")
-        .exclude("target/**");
+        .glob("!.git/**")
+        .glob("!target/**");
 
     clone_tree("./", "./sandbox", &opts)?;
     Ok(())
@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
 ### Highlights
 
 * **Fast COW clone** on APFS, Btrfs, XFS, overlayfs…
-* **Glob exclusions** (`globset` syntax) to skip files or directories.
+* **Flexible glob patterns** to include/exclude files (uses `!` prefix for exclusions).
 * **Graceful fallback** to `std::fs::copy` when reflinks are unsupported.
 * **Force‑overwrite** option to replace existing destinations.
 * **Pure Rust**, no unsafe code, minimal deps.

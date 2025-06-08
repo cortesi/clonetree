@@ -5,7 +5,7 @@ use std::path::Path;
 
 #[derive(Debug, Default)]
 pub struct Options {
-    excludes: Vec<String>,
+    globs: Vec<String>,
     force: bool,
     no_reflink: bool,
 }
@@ -15,8 +15,8 @@ impl Options {
         Self::default()
     }
 
-    pub fn exclude<S: Into<String>>(mut self, pattern: S) -> Self {
-        self.excludes.push(pattern.into());
+    pub fn glob<S: Into<String>>(mut self, pattern: S) -> Self {
+        self.globs.push(pattern.into());
         self
     }
 
@@ -55,12 +55,11 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     let mut builder = WalkBuilder::new(src);
     builder.standard_filters(false);
 
-    // Add exclude patterns using overrides
-    if !options.excludes.is_empty() {
+    // Add glob patterns using overrides
+    if !options.globs.is_empty() {
         let mut overrides = OverrideBuilder::new(src);
-        for pattern in &options.excludes {
-            // Add ! prefix to exclude the pattern
-            overrides.add(&format!("!{pattern}"))?;
+        for pattern in &options.globs {
+            overrides.add(pattern)?;
         }
         builder.overrides(overrides.build()?);
     }
@@ -148,14 +147,43 @@ mod tests {
         fs::create_dir(src.join(".git"))?;
         fs::write(src.join(".git/config"), "exclude")?;
 
-        // Clone with excludes
-        let opts = Options::new().exclude("target/**").exclude(".git/**");
+        // Clone with exclude globs (! prefix excludes)
+        let opts = Options::new().glob("!target/**").glob("!.git/**");
         clone_tree(&src, &dest, &opts)?;
 
         // Verify excludes worked
         assert!(dest.join("file.txt").exists());
         assert!(!dest.join("target").exists());
         assert!(!dest.join(".git").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_clone_tree_with_positive_globs() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        // Create source structure
+        fs::create_dir_all(&src)?;
+        fs::write(src.join("include1.txt"), "include")?;
+        fs::write(src.join("include2.txt"), "include")?;
+        fs::write(src.join("exclude.log"), "exclude")?;
+        fs::create_dir(src.join("data"))?;
+        fs::write(src.join("data/file.txt"), "include")?;
+        fs::write(src.join("data/debug.log"), "exclude")?;
+
+        // Clone with positive globs (only include .txt files)
+        let opts = Options::new().glob("**/*.txt");
+        clone_tree(&src, &dest, &opts)?;
+
+        // Verify only .txt files were included
+        assert!(dest.join("include1.txt").exists());
+        assert!(dest.join("include2.txt").exists());
+        assert!(dest.join("data/file.txt").exists());
+        assert!(!dest.join("exclude.log").exists());
+        assert!(!dest.join("data/debug.log").exists());
 
         Ok(())
     }
