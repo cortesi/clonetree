@@ -92,8 +92,6 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
                 reflink_or_copy(path, &dest_path)?;
             }
         }
-        // Note: We don't explicitly create directories anymore.
-        // They will be created as needed when copying files.
     }
 
     Ok(())
