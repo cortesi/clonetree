@@ -6,10 +6,13 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
-authors = []
-license = "MIT OR Apache-2.0"
-repository = ""
+authors = ["Aldo Cortesi <aldo@corte.si>"]
+license = "MIT"
+repository = "https://github.com/cortesi/clonetree"
+description = "A copy-on-write directory library for Rust with fast reflink cloning"
+keywords = ["copy-on-write", "reflink", "clone", "filesystem", "directory"]
 
 [workspace.dependencies]
+clonetree = { version = "0.0.1", path = "crates/clonetree" }

@@ -7,6 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-clonetree = { path = "../clonetree" }
+clonetree = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
