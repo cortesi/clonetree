@@ -85,29 +85,35 @@ fn benchmark_clone_tree(c: &mut Criterion) {
     for config in &configs {
         let total_files = calculate_total_files(config.file_count, config.depth, config.fanout);
 
+        // Create the source tree once for this configuration
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        create_test_tree(
+            &src,
+            config.file_count,
+            config.depth,
+            config.fanout,
+            config.file_size,
+        );
+
         group.bench_with_input(
             BenchmarkId::new(config.name, format!("{total_files}_files")),
-            config,
-            |b, config| {
+            &(config, &temp_dir, &src),
+            |b, &(config, temp_dir, src)| {
                 b.iter_with_setup(
                     || {
-                        let temp_dir = TempDir::new().unwrap();
-                        let src = temp_dir.path().join("src");
+                        // Just create a fresh destination directory for each iteration
                         let dest = temp_dir.path().join("dest");
-                        fs::create_dir(&src).unwrap();
-                        create_test_tree(
-                            &src,
-                            config.file_count,
-                            config.depth,
-                            config.fanout,
-                            config.file_size,
-                        );
-                        (temp_dir, src, dest)
+                        // Remove destination if it exists from previous iteration
+                        if dest.exists() {
+                            fs::remove_dir_all(&dest).unwrap();
+                        }
+                        dest
                     },
-                    |(temp_dir, src, dest)| {
+                    |dest| {
                         let options = Options::new();
-                        clone_tree(black_box(&src), black_box(&dest), black_box(&options)).unwrap();
-                        temp_dir // Return to keep it alive
+                        clone_tree(black_box(src), black_box(&dest), black_box(&options)).unwrap();
                     },
                 );
             },
