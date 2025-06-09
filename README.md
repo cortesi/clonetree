@@ -1,3 +1,7 @@
+![Discord](https://img.shields.io/discord/1381424110831145070?style=flat-square&logo=rust&link=https%3A%2F%2Fdiscord.gg%2FfHmRmuBDxF)
+[![Crates.io](https://img.shields.io/crates/v/clonetree)](https://crates.io/crates/clonetree)
+[![docs.rs](https://img.shields.io/docsrs/clonetree)](https://docs.rs/clonetree)
+
 # clonetree
 
 **A copy‑on‑write directory library for Rust**
@@ -5,6 +9,12 @@
 `clonetree` is a **Rust crate** for fast directory duplication. It uses
 filesystem‑level *reflinks* so large trees are cloned quickly and consume no
 extra space until files diverge.
+
+---
+## Community
+
+Want to contribute? Have ideas or feature requests? Come tell us about it on
+[Discord](https://discord.gg/fHmRmuBDxF).
 
 ---
 
