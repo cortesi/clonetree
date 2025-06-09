@@ -28,6 +28,11 @@
 //!     .glob("**/*.rs")      // Include only Rust files
 //!     .glob("!target/**");  // Exclude target directory
 //! clone_tree("/source", "/dest", &options)?;
+//!
+//! // Clone with overwrite enabled
+//! let options = Options::new()
+//!     .overwrite(true);     // Allow overwriting existing files
+//! clone_tree("/source", "/existing_dest", &options)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -36,12 +41,13 @@
 //!
 //! The `clone_tree` function enforces the following constraints:
 //! - Source path must exist and be a directory
-//! - Destination path must not exist
+//! - Destination path must not exist (unless `overwrite` option is enabled)
 //!
 //! These constraints are validated before any filesystem operations begin.
 
 use ignore::{overrides::OverrideBuilder, WalkBuilder};
 use reflink_copy::reflink_or_copy;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -90,6 +96,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Default)]
 pub struct Options {
     globs: Vec<String>,
+    overwrite: bool,
 }
 
 impl Options {
@@ -99,6 +106,11 @@ impl Options {
 
     pub fn glob<S: Into<String>>(mut self, pattern: S) -> Self {
         self.globs.push(pattern.into());
+        self
+    }
+
+    pub fn overwrite(mut self, overwrite: bool) -> Self {
+        self.overwrite = overwrite;
         self
     }
 }
@@ -125,18 +137,24 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
         });
     }
 
-    // Validate destination does not exist
-    if dest.exists() {
+    // Validate destination
+    if dest.exists() && !options.overwrite {
         return Err(Error::DestinationExists {
             path: dest.to_path_buf(),
         });
     }
 
-    // Create destination directory
-    std::fs::create_dir_all(dest).map_err(|e| Error::CreateDirectory {
-        path: dest.to_path_buf(),
-        source: e,
-    })?;
+    // Create destination directory if it doesn't exist
+    if !dest.exists() {
+        std::fs::create_dir_all(dest).map_err(|source| Error::CreateDirectory {
+            path: dest.to_path_buf(),
+            source,
+        })?;
+    }
+
+    // Track created directories to avoid redundant create_dir_all calls
+    let mut created_dirs = HashSet::new();
+    created_dirs.insert(dest.to_path_buf());
 
     // Build walker with standard filters disabled
     let mut builder = WalkBuilder::new(src);
@@ -146,10 +164,12 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     if !options.globs.is_empty() {
         let mut overrides = OverrideBuilder::new(src);
         for pattern in &options.globs {
-            overrides.add(pattern).map_err(|e| Error::InvalidGlob {
-                pattern: pattern.clone(),
-                source: e,
-            })?;
+            overrides
+                .add(pattern)
+                .map_err(|source| Error::InvalidGlob {
+                    pattern: pattern.clone(),
+                    source,
+                })?;
         }
         builder.overrides(
             overrides
@@ -160,7 +180,7 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Walk the source directory
     for entry in builder.build() {
-        let entry = entry.map_err(|e| Error::Other(format!("Walk error: {e}")))?;
+        let entry = entry.map_err(|source| Error::Other(format!("Walk error: {source}")))?;
         let path = entry.path();
 
         // Skip the root directory itself
@@ -174,21 +194,30 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
             .map_err(|e| Error::Other(format!("Failed to strip prefix from path: {e}")))?;
         let dest_path = dest.join(relative_path);
 
-        // Copy file or create directory
+        // Only process files
         if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             // Create parent directories if needed
             if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirectory {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
+                // Only create directory if we haven't created it before
+                if !created_dirs.contains(parent) {
+                    std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+                    created_dirs.insert(parent.to_path_buf());
+                }
+            }
+
+            // If overwrite is enabled and the destination exists, remove it first
+            if options.overwrite && dest_path.exists() {
+                std::fs::remove_file(&dest_path).map_err(Error::Io)?;
             }
 
             // Copy file using reflink when available
-            reflink_or_copy(path, &dest_path).map_err(|e| Error::Copy {
+            reflink_or_copy(path, &dest_path).map_err(|source| Error::Copy {
                 src: path.to_path_buf(),
                 dest: dest_path.clone(),
-                source: e,
+                source,
             })?;
         }
     }
@@ -326,5 +355,51 @@ mod tests {
         let result = clone_tree(&src, &dest, &opts);
 
         assert!(matches!(result, Err(Error::DestinationExists { .. })));
+    }
+
+    #[test]
+    fn test_overwrite_existing_files() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        // Create source structure
+        fs::create_dir_all(&src)?;
+        fs::write(src.join("file1.txt"), "new_content1")?;
+        fs::write(src.join("file2.txt"), "new_content2")?;
+        fs::create_dir(src.join("subdir"))?;
+        fs::write(src.join("subdir/file3.txt"), "new_content3")?;
+
+        // Create destination with some existing files
+        fs::create_dir_all(&dest)?;
+        fs::write(dest.join("file1.txt"), "old_content1")?;
+        fs::write(dest.join("existing_file.txt"), "should_remain")?;
+        fs::create_dir(dest.join("subdir"))?;
+        fs::write(dest.join("subdir/file3.txt"), "old_content3")?;
+        fs::write(dest.join("subdir/existing_file.txt"), "should_remain")?;
+
+        // Clone with overwrite enabled
+        let opts = Options::new().overwrite(true);
+        clone_tree(&src, &dest, &opts)?;
+
+        // Verify overwrites happened
+        assert_eq!(fs::read_to_string(dest.join("file1.txt"))?, "new_content1");
+        assert_eq!(fs::read_to_string(dest.join("file2.txt"))?, "new_content2");
+        assert_eq!(
+            fs::read_to_string(dest.join("subdir/file3.txt"))?,
+            "new_content3"
+        );
+
+        // Verify existing files that weren't in source remain untouched
+        assert_eq!(
+            fs::read_to_string(dest.join("existing_file.txt"))?,
+            "should_remain"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("subdir/existing_file.txt"))?,
+            "should_remain"
+        );
+
+        Ok(())
     }
 }

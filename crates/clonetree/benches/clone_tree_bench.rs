@@ -100,7 +100,7 @@ fn benchmark_clone_tree(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new(config.name, format!("{total_files}_files")),
             &(config, &temp_dir, &src),
-            |b, &(config, temp_dir, src)| {
+            |b, &(_config, temp_dir, src)| {
                 b.iter_with_setup(
                     || {
                         // Just create a fresh destination directory for each iteration
