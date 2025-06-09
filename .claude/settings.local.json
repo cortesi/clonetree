@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./target/debug/ctree:*)",
+      "Bash(git add:*)",
+      "Bash(mkdir:*)",
+      "Bash(timeout 30 cargo bench clone_tree_bench)"
+    ],
+    "deny": []
+  }
+}

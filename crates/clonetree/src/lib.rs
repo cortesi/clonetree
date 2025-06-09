@@ -101,7 +101,6 @@ impl Options {
         self.globs.push(pattern.into());
         self
     }
-
 }
 
 pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
