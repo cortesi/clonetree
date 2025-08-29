@@ -11,11 +11,11 @@ readme = "../../README.md"
 [dependencies]
 reflink-copy = "0.1"
 ignore = "0.4"
-thiserror = "1.0"
+thiserror = "2.0"
 
 [dev-dependencies]
-tempfile = "3.0"
-criterion = "0.5"
+tempfile = "3.21"
+criterion = "0.7"
 
 [[bench]]
 name = "clone_tree_bench"
