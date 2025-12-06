@@ -47,9 +47,9 @@
 
 use std::{
     collections::HashSet,
-    fs, io,
+    env, fs, io,
     io::ErrorKind,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     result,
 };
 
@@ -148,6 +148,31 @@ pub enum Error {
         /// Glob patterns provided alongside the single-call strategy.
         patterns: Vec<String>,
     },
+
+    #[error("Source and destination resolve to the same path: {path}")]
+    /// Source and destination paths are identical after resolution.
+    IdenticalPaths {
+        /// Resolved absolute path shared by source and destination.
+        path: PathBuf,
+    },
+
+    #[error("Destination lies inside the source tree: src={src}, dest={dest}")]
+    /// Destination is a descendant of the source path.
+    DestinationInsideSource {
+        /// Canonicalized source path.
+        src: PathBuf,
+        /// Canonicalized destination path.
+        dest: PathBuf,
+    },
+
+    #[error("Source lies inside the destination tree: src={src}, dest={dest}")]
+    /// Source is a descendant of the destination path.
+    SourceInsideDestination {
+        /// Canonicalized source path.
+        src: PathBuf,
+        /// Canonicalized destination path.
+        dest: PathBuf,
+    },
 }
 
 /// Convenience result type for clonetree operations.
@@ -233,6 +258,28 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     if dest.exists() && !dest.is_dir() {
         return Err(Error::DestinationNotDirectory {
             path: dest.to_path_buf(),
+        });
+    }
+
+    // Resolve absolute paths to guard against unsafe relationships
+    let src_canon = canonicalize_existing(src)?;
+    let dest_resolved = canonicalize_for_destination(dest)?;
+
+    if src_canon == dest_resolved {
+        return Err(Error::IdenticalPaths { path: src_canon });
+    }
+
+    if dest_resolved.starts_with(&src_canon) {
+        return Err(Error::DestinationInsideSource {
+            src: src_canon,
+            dest: dest_resolved,
+        });
+    }
+
+    if src_canon.starts_with(&dest_resolved) {
+        return Err(Error::SourceInsideDestination {
+            src: src_canon,
+            dest: dest_resolved,
         });
     }
 
@@ -431,6 +478,62 @@ fn remove_destination(dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Canonicalize an existing path, ensuring symlinks are resolved.
+fn canonicalize_existing(path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(path).map_err(Error::from)
+}
+
+/// Convert a path to an absolute, cleaned form even if the final component does not yet exist.
+fn canonicalize_for_destination(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return canonicalize_existing(path);
+    }
+
+    let absolute = absolutize(path)?;
+
+    let mut existing = absolute.as_path();
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| Error::Other("Destination path must include a parent".to_owned()))?;
+    }
+
+    let resolved_existing = canonicalize_existing(existing)?;
+    let remainder = absolute
+        .strip_prefix(existing)
+        .map_err(|e| Error::Other(format!("Failed to strip prefix: {e}")))?;
+
+    Ok(clean_path(&resolved_existing.join(remainder)))
+}
+
+/// Produce an absolute path with `.`/`..` removed, based on the current directory.
+fn absolutize(path: &Path) -> Result<PathBuf> {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+
+    Ok(clean_path(&joined))
+}
+
+/// Normalize a path by removing `.` and `..` components without touching symlinks.
+fn clean_path(path: &Path) -> PathBuf {
+    let mut cleaned = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                cleaned.pop();
+            }
+            other => cleaned.push(other),
+        }
+    }
+
+    cleaned
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -441,6 +544,10 @@ mod tests {
 
     fn write_file(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap();
+    }
+
+    fn mkdir(path: &Path) {
+        fs::create_dir_all(path).unwrap();
     }
 
     #[test]
@@ -676,5 +783,43 @@ mod tests {
         assert_eq!(fs::read_to_string(dest.join("file.txt"))?, "new");
         assert!(!dest.join("old_only.txt").exists());
         Ok(())
+    }
+
+    #[test]
+    fn identical_paths_are_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("dir");
+        mkdir(&src);
+
+        let opts = Options::new();
+        let result = clone_tree(&src, &src, &opts);
+
+        assert!(matches!(result, Err(Error::IdenticalPaths { .. })));
+    }
+
+    #[test]
+    fn destination_inside_source_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("src");
+        let dest = src.join("nested/dest");
+        mkdir(&src);
+
+        let opts = Options::new().overwrite(true);
+        let result = clone_tree(&src, &dest, &opts);
+
+        assert!(matches!(result, Err(Error::DestinationInsideSource { .. })));
+    }
+
+    #[test]
+    fn source_inside_destination_is_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path().join("dest");
+        let src = dest.join("inner/src");
+        mkdir(&src);
+
+        let opts = Options::new().overwrite(true);
+        let result = clone_tree(&src, &dest, &opts);
+
+        assert!(matches!(result, Err(Error::SourceInsideDestination { .. })));
     }
 }
