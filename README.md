@@ -28,6 +28,8 @@ Want to contribute? Have ideas or feature requests? Come tell us about it on
 
 * **Graceful fallback** to `std::fs::copy` when reflinks are unsupported.
 
+* **Symlink preservation** — symbolic links are recreated with their original targets.
+
 * **Pure Rust**, no unsafe code, minimal deps.
 
 ---
@@ -124,6 +126,19 @@ ctree . ./sandbox \
   exist; incompatible with glob filters).
 * `full-traversal`: user-space walk that reflinks each file individually (works
   everywhere and honors glob filters).
+
+---
+
+## Symlink handling
+
+Symbolic links are preserved as symbolic links — they are not followed or
+dereferenced. The link target is copied verbatim, so relative symlinks maintain
+their relative paths in the cloned tree.
+
+| Strategy         | Symlink behaviour                                          |
+| ---------------- | ---------------------------------------------------------- |
+| `single-call`    | Preserved by the kernel's `clonefile(2)` (macOS only)      |
+| `full-traversal` | Recreated via `symlink(2)` (Unix) or `CreateSymbolicLink` (Windows) |
 
 ---
 

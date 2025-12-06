@@ -9,6 +9,7 @@
 //!
 //! - **Copy-on-Write Support**: Automatically uses reflinks when available on
 //!   supported filesystems (Btrfs, XFS, APFS, etc.)
+//! - **Symlink Preservation**: Symbolic links are recreated with their original targets
 //! - **Glob Filtering**: Include or exclude files using glob patterns
 //! - **Efficient Traversal**: Built on the `ignore` crate for fast directory walking
 //! - **Type-Safe Errors**: Comprehensive error handling with descriptive error types
@@ -44,6 +45,17 @@
 //! - Destination path must not exist (unless `overwrite` option is enabled)
 //!
 //! These constraints are validated before any filesystem operations begin.
+//!
+//! # Symlink Handling
+//!
+//! Symbolic links in the source tree are preserved as symbolic links in the
+//! destination. The link targets are copied verbatim (not resolved), so relative
+//! symlinks maintain their relative paths.
+//!
+//! - **`FullTraversal` strategy**: Symlinks are recreated using platform-native
+//!   symlink creation (`symlink(2)` on Unix, `CreateSymbolicLink` on Windows).
+//! - **`SingleCall` strategy** (macOS only): The kernel's `clonefile(2)` preserves
+//!   symlinks automatically as part of the atomic directory clone.
 
 use std::{
     collections::HashSet,
@@ -427,20 +439,36 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
             .map_err(|e| Error::Other(format!("Failed to strip prefix from path: {e}")))?;
         let dest_path = dest.join(relative_path);
 
-        // Only process files
-        if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-            // Create parent directories if needed
-            if let Some(parent) = dest_path.parent() {
-                // Only create directory if we haven't created it before
-                if !created_dirs.contains(parent) {
-                    fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-                    created_dirs.insert(parent.to_path_buf());
-                }
+        // Create parent directories if needed
+        if let Some(parent) = dest_path.parent() {
+            if !created_dirs.contains(parent) {
+                fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+                created_dirs.insert(parent.to_path_buf());
+            }
+        }
+
+        // Handle symlinks by recreating them
+        if entry.path_is_symlink() {
+            let target = fs::read_link(path).map_err(|source| Error::Copy {
+                src: path.to_path_buf(),
+                dest: dest_path.clone(),
+                source,
+            })?;
+
+            // If overwrite is enabled and the destination exists, remove it first
+            if options.overwrite && dest_path.symlink_metadata().is_ok() {
+                remove_dest_entry(&dest_path)?;
             }
 
+            create_symlink(&target, &dest_path, path).map_err(|source| Error::Copy {
+                src: path.to_path_buf(),
+                dest: dest_path.clone(),
+                source,
+            })?;
+        } else if entry.file_type().is_some_and(|ft| ft.is_file()) {
             // If overwrite is enabled and the destination exists, remove it first
             if options.overwrite && dest_path.exists() {
                 if let Err(err) = fs::remove_file(&dest_path) {
@@ -476,6 +504,54 @@ fn remove_destination(dest: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Create a symbolic link at `dest` pointing to `target`.
+///
+/// The `original_path` is used on Windows to determine if the target is a directory.
+#[cfg(unix)]
+#[allow(clippy::absolute_paths)] // Platform-specific import not worth conditional use
+fn create_symlink(target: &Path, dest: &Path, _original_path: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, dest)
+}
+
+/// Create a symbolic link at `dest` pointing to `target`.
+///
+/// The `original_path` is used on Windows to determine if the target is a directory.
+#[cfg(windows)]
+#[allow(clippy::absolute_paths)] // Platform-specific import not worth conditional use
+fn create_symlink(target: &Path, dest: &Path, original_path: &Path) -> io::Result<()> {
+    // On Windows, we need to know if the target is a directory
+    let target_is_dir = original_path
+        .parent()
+        .map(|p| p.join(target))
+        .and_then(|full| fs::metadata(full).ok())
+        .is_some_and(|m| m.is_dir());
+
+    if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, dest)
+    } else {
+        std::os::windows::fs::symlink_file(target, dest)
+    }
+}
+
+/// Remove a destination entry (file, symlink, or directory) before overwriting.
+fn remove_dest_entry(dest: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(dest).map_err(|source| Error::RemoveDestination {
+        path: dest.to_path_buf(),
+        source,
+    })?;
+
+    if meta.is_dir() {
+        fs::remove_dir_all(dest)
+    } else {
+        // Files and symlinks
+        fs::remove_file(dest)
+    }
+    .map_err(|source| Error::RemoveDestination {
+        path: dest.to_path_buf(),
+        source,
+    })
 }
 
 /// Canonicalize an existing path, ensuring symlinks are resolved.
@@ -821,5 +897,87 @@ mod tests {
         let result = clone_tree(&src, &dest, &opts);
 
         assert!(matches!(result, Err(Error::SourceInsideDestination { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_recreated() -> Result<()> {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = TempDir::new()?;
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        // Create source structure with symlinks
+        fs::create_dir_all(&src)?;
+        write_file(&src.join("file.txt"), "content");
+        unix_fs::symlink("file.txt", src.join("link_to_file.txt"))?;
+
+        // Create a subdirectory and symlink to it
+        fs::create_dir(src.join("subdir"))?;
+        write_file(&src.join("subdir/nested.txt"), "nested");
+        unix_fs::symlink("subdir", src.join("link_to_dir"))?;
+
+        // Clone the tree
+        let opts = Options::new().strategy(CloneStrategy::FullTraversal);
+        clone_tree(&src, &dest, &opts)?;
+
+        // Verify file was copied
+        assert!(dest.join("file.txt").exists());
+        assert_eq!(fs::read_to_string(dest.join("file.txt"))?, "content");
+
+        // Verify symlink to file was recreated as a symlink
+        let link_meta = fs::symlink_metadata(dest.join("link_to_file.txt"))?;
+        assert!(link_meta.file_type().is_symlink(), "should be a symlink");
+        assert_eq!(fs::read_link(dest.join("link_to_file.txt"))?, PathBuf::from("file.txt"));
+        // Verify the symlink works
+        assert_eq!(fs::read_to_string(dest.join("link_to_file.txt"))?, "content");
+
+        // Verify symlink to directory was recreated
+        let dir_link_meta = fs::symlink_metadata(dest.join("link_to_dir"))?;
+        assert!(dir_link_meta.file_type().is_symlink(), "should be a symlink");
+        assert_eq!(fs::read_link(dest.join("link_to_dir"))?, PathBuf::from("subdir"));
+
+        Ok(())
+    }
+
+    /// Verify that SingleCall strategy on macOS preserves symlinks via clonefile(2).
+    /// This documents that the kernel handles symlinks correctly in single-call mode.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn single_call_preserves_symlinks() -> Result<()> {
+        use std::os::unix::fs as unix_fs;
+
+        let temp_dir = TempDir::new()?;
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        // Create source structure with symlinks
+        fs::create_dir_all(&src)?;
+        write_file(&src.join("file.txt"), "content");
+        unix_fs::symlink("file.txt", src.join("link_to_file.txt"))?;
+        fs::create_dir(src.join("subdir"))?;
+        unix_fs::symlink("subdir", src.join("link_to_dir"))?;
+
+        // Clone using SingleCall strategy
+        let opts = Options::new().strategy(CloneStrategy::SingleCall);
+        clone_tree(&src, &dest, &opts)?;
+
+        // Verify symlinks are preserved (clonefile preserves symlinks)
+        let link_meta = fs::symlink_metadata(dest.join("link_to_file.txt"))?;
+        assert!(link_meta.file_type().is_symlink(), "should be a symlink");
+        assert_eq!(
+            fs::read_link(dest.join("link_to_file.txt"))?,
+            PathBuf::from("file.txt")
+        );
+
+        let dir_link_meta = fs::symlink_metadata(dest.join("link_to_dir"))?;
+        assert!(dir_link_meta.file_type().is_symlink(), "should be a symlink");
+        assert_eq!(
+            fs::read_link(dest.join("link_to_dir"))?,
+            PathBuf::from("subdir")
+        );
+
+        Ok(())
     }
 }
