@@ -1,3 +1,5 @@
+//! Command-line interface for cloning directory trees with reflinks.
+
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use clonetree::{clone_tree, CloneStrategy, Options};
@@ -8,6 +10,7 @@ use clonetree::{clone_tree, CloneStrategy, Options};
     about = "Copy-on-write directory tree cloning",
     long_about = "Copies a directory tree using filesystem reflinks when available, with glob-based filtering"
 )]
+/// Command-line arguments for the `ctree` executable.
 struct Args {
     /// Source directory to clone
     src: String,
@@ -30,18 +33,22 @@ struct Args {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
+/// Strategy option exposed to CLI users.
 enum StrategyArg {
+    /// Automatically choose the best available strategy.
     Auto,
+    /// Force a single system call when supported.
     SingleCall,
+    /// Walk the tree and clone files one by one.
     FullTraversal,
 }
 
 impl From<StrategyArg> for CloneStrategy {
     fn from(arg: StrategyArg) -> Self {
         match arg {
-            StrategyArg::Auto => CloneStrategy::Auto,
-            StrategyArg::SingleCall => CloneStrategy::SingleCall,
-            StrategyArg::FullTraversal => CloneStrategy::FullTraversal,
+            StrategyArg::Auto => Self::Auto,
+            StrategyArg::SingleCall => Self::SingleCall,
+            StrategyArg::FullTraversal => Self::FullTraversal,
         }
     }
 }

@@ -1,41 +1,41 @@
+//! Benchmarks for clonetree copy strategies.
+
+use std::{fs, hint::black_box, path::Path, time::Duration};
+
 use clonetree::{clone_tree, CloneStrategy, Options};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::fs;
+use criterion::{measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion};
 use tempfile::TempDir;
 
-// Constants for benchmark configuration
-const SMALL_SIZE: usize = 1_000; // 1KB per file
-const LARGE_SIZE: usize = 100_000; // 100KB per file
+/// Size in bytes for small benchmark files.
+const SMALL_SIZE: usize = 1_000;
+/// Size in bytes for large benchmark files.
+const LARGE_SIZE: usize = 100_000;
 
-// Benchmark configuration
+/// Parameters describing one benchmark configuration.
 struct BenchConfig {
+    /// Label used in benchmark output.
     name: &'static str,
+    /// Number of files created at each level.
     file_count: usize,
+    /// Depth of the directory tree.
     depth: usize,
+    /// Number of subdirectories per level.
     fanout: usize,
+    /// Size in bytes for each file.
     file_size: usize,
 }
 
-fn create_test_tree(
-    dir: &std::path::Path,
-    file_count: usize,
-    depth: usize,
-    fanout: usize,
-    file_size: usize,
-) {
-    // Create a balanced tree structure
+/// Create a balanced directory tree populated with files.
+fn create_test_tree(dir: &Path, file_count: usize, depth: usize, fanout: usize, file_size: usize) {
     if depth == 0 {
         return;
     }
 
-    // Create files at this level
     for i in 0..file_count {
-        // Create a file with file_size bytes
         let content = vec![b'X'; file_size];
         fs::write(dir.join(format!("file_{i}.txt")), content).unwrap();
     }
 
-    // Create subdirectories and recurse
     if depth > 1 {
         for i in 0..fanout {
             let subdir = dir.join(format!("subdir_{i}"));
@@ -45,11 +45,11 @@ fn create_test_tree(
     }
 }
 
+/// Benchmark clone_tree across multiple configurations and strategies.
 fn benchmark_clone_tree(c: &mut Criterion) {
     let mut group = c.benchmark_group("clone_tree");
-    group.measurement_time(std::time::Duration::from_secs(30));
+    group.measurement_time(Duration::from_secs(30));
 
-    // Define benchmark configurations
     let configs = [
         BenchConfig {
             name: "shallow_small",
@@ -132,12 +132,13 @@ fn benchmark_clone_tree(c: &mut Criterion) {
     group.finish();
 }
 
+/// Run a single benchmark configuration using a specific strategy.
 fn bench_with_strategy(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    group: &mut BenchmarkGroup<'_, WallTime>,
     config: &BenchConfig,
     total_files: usize,
     temp_dir: &TempDir,
-    src: &std::path::Path,
+    src: &Path,
     strategy: CloneStrategy,
     label: &str,
 ) {
@@ -165,15 +166,15 @@ fn bench_with_strategy(
     );
 }
 
+/// Calculate the total number of files produced by `create_test_tree`.
 fn calculate_total_files(files_per_level: usize, depth: usize, dirs_per_level: usize) -> usize {
     if depth == 0 {
         return 0;
     }
 
-    let mut total = files_per_level; // Files at current level
+    let mut total = files_per_level;
 
     if depth > 1 {
-        // Only recurse if depth > 1 (matching create_test_tree logic)
         for _i in 0..dirs_per_level {
             total += calculate_total_files(files_per_level, depth - 1, dirs_per_level);
         }
@@ -182,5 +183,8 @@ fn calculate_total_files(files_per_level: usize, depth: usize, dirs_per_level: u
     total
 }
 
-criterion_group!(benches, benchmark_clone_tree);
-criterion_main!(benches);
+/// Entry point invoked by `cargo bench`.
+fn main() {
+    let mut criterion = Criterion::default().configure_from_args();
+    benchmark_clone_tree(&mut criterion);
+}

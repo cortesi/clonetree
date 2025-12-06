@@ -12,3 +12,6 @@ readme = "../../README.md"
 clonetree = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+
+[lints]
+workspace = true

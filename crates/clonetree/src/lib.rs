@@ -45,75 +45,121 @@
 //!
 //! These constraints are validated before any filesystem operations begin.
 
+use std::{
+    collections::HashSet,
+    fs, io,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    result,
+};
+
 use ignore::{overrides::OverrideBuilder, WalkBuilder};
 use reflink_copy::{reflink, reflink_or_copy};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// Errors that can occur while cloning directory trees.
 #[derive(Error, Debug)]
 pub enum Error {
+    /// Propagated I/O error from an underlying filesystem operation.
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
     #[error("Failed to create directory at {path}: {source}")]
+    /// Creation of a destination directory failed.
     CreateDirectory {
+        /// Destination directory path that failed to be created.
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        /// Source I/O error returned by the filesystem.
+        source: io::Error,
     },
 
     #[error("Failed to copy file from {src} to {dest}: {source}")]
+    /// Copying or reflinking a file from source to destination failed.
     Copy {
+        /// Source file being copied.
         src: PathBuf,
+        /// Destination path for the copy.
         dest: PathBuf,
         #[source]
-        source: std::io::Error,
+        /// Underlying I/O error from the copy operation.
+        source: io::Error,
     },
 
     #[error("Failed to remove existing destination at {path}: {source}")]
+    /// Removing a pre-existing destination entry failed.
     RemoveDestination {
+        /// Path that could not be removed.
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        /// Underlying I/O error from removal.
+        source: io::Error,
     },
 
     #[error("Invalid glob pattern '{pattern}': {source}")]
+    /// Supplied glob pattern could not be parsed by the ignore crate.
     InvalidGlob {
+        /// Glob expression supplied by the caller.
         pattern: String,
         #[source]
+        /// Parser error from the ignore crate.
         source: ignore::Error,
     },
 
     #[error("Destination already exists: {path}")]
-    DestinationExists { path: PathBuf },
+    /// Destination already exists and overwrite was not requested.
+    DestinationExists {
+        /// Conflicting destination path.
+        path: PathBuf,
+    },
 
     #[error("Destination is not a directory: {path}")]
-    DestinationNotDirectory { path: PathBuf },
+    /// Destination exists but is not a directory.
+    DestinationNotDirectory {
+        /// Destination path that is not a directory.
+        path: PathBuf,
+    },
 
     #[error("Source is not a directory: {path}")]
-    SourceNotDirectory { path: PathBuf },
+    /// Source path exists but is not a directory.
+    SourceNotDirectory {
+        /// Source path that is not a directory.
+        path: PathBuf,
+    },
 
     #[error("Source does not exist: {path}")]
-    SourceNotFound { path: PathBuf },
+    /// Source path does not exist.
+    SourceNotFound {
+        /// Missing source path.
+        path: PathBuf,
+    },
 
     #[error("Operation error: {0}")]
+    /// Generic error message for unexpected conditions.
     Other(String),
 
     #[error("Single-call cloning is only available on macOS")]
+    /// Single-call cloning was requested on an unsupported platform.
     SingleCallUnsupported,
 
     #[error("Single-call cloning cannot be combined with glob filters: {patterns:?}")]
-    IncompatibleOptions { patterns: Vec<String> },
+    /// Single-call cloning cannot be used when glob filters are present.
+    IncompatibleOptions {
+        /// Glob patterns provided alongside the single-call strategy.
+        patterns: Vec<String>,
+    },
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+/// Convenience result type for clonetree operations.
+pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Strategy used when cloning a directory tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloneStrategy {
     /// Choose the fastest supported strategy. On macOS this prefers a
     /// single `clonefile` call when possible; otherwise it falls back to the
     /// full directory traversal used on other platforms.
+    #[default]
     Auto,
     /// Force a single system call to clone the root directory (macOS only).
     /// This cannot be combined with glob filters because the kernel copies the
@@ -123,40 +169,44 @@ pub enum CloneStrategy {
     FullTraversal,
 }
 
-impl Default for CloneStrategy {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
+/// Builder-style options that control cloning behaviour.
 #[derive(Debug, Default)]
 pub struct Options {
+    /// Glob patterns applied to the source tree (negated patterns exclude).
     globs: Vec<String>,
+    /// Whether existing destination entries should be overwritten.
     overwrite: bool,
+    /// How files and directories should be cloned.
     strategy: CloneStrategy,
 }
 
 impl Options {
+    /// Construct a new options set with defaults.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Add a glob pattern to include or exclude when traversing.
     pub fn glob<S: Into<String>>(mut self, pattern: S) -> Self {
         self.globs.push(pattern.into());
         self
     }
 
+    /// Enable or disable overwriting of existing destination entries.
     pub fn overwrite(mut self, overwrite: bool) -> Self {
         self.overwrite = overwrite;
         self
     }
 
+    /// Specify the cloning strategy to use.
     pub fn strategy(mut self, strategy: CloneStrategy) -> Self {
         self.strategy = strategy;
         self
     }
 }
 
+/// Clone a directory tree from `src` to `dest` using the provided `options`.
+/// Validates inputs up-front and selects the appropriate cloning strategy.
 pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dest: Q,
@@ -192,7 +242,7 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
         });
     }
 
-    let use_single_call = should_use_single_call(&options)?;
+    let use_single_call = should_use_single_call(options)?;
 
     if use_single_call {
         return clone_tree_single_call(src, dest, options);
@@ -201,6 +251,7 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     clone_tree_full_traversal(src, dest, options)
 }
 
+/// Determine whether to use the single-call strategy based on options and platform.
 fn should_use_single_call(options: &Options) -> Result<bool> {
     if !options.globs.is_empty() {
         if matches!(options.strategy, CloneStrategy::SingleCall) {
@@ -225,6 +276,7 @@ fn should_use_single_call(options: &Options) -> Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
+/// Use the platform single-call clone when available (macOS `clonefile`).
 fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dest: Q,
@@ -245,7 +297,7 @@ fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
 
     if let Some(parent) = dest.parent() {
         if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
+            fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -260,6 +312,7 @@ fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
 }
 
 #[cfg(not(target_os = "macos"))]
+/// Stub for platforms that do not support single-call cloning.
 fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
     _src: P,
     _dest: Q,
@@ -268,6 +321,7 @@ fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
     Err(Error::SingleCallUnsupported)
 }
 
+/// Walk the source tree and reflink or copy each file into `dest`.
 fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dest: Q,
@@ -278,7 +332,7 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Create destination directory if it doesn't exist
     if !dest.exists() {
-        std::fs::create_dir_all(dest).map_err(|source| Error::CreateDirectory {
+        fs::create_dir_all(dest).map_err(|source| Error::CreateDirectory {
             path: dest.to_path_buf(),
             source,
         })?;
@@ -332,7 +386,7 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
             if let Some(parent) = dest_path.parent() {
                 // Only create directory if we haven't created it before
                 if !created_dirs.contains(parent) {
-                    std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
+                    fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
                         path: parent.to_path_buf(),
                         source,
                     })?;
@@ -342,8 +396,8 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
 
             // If overwrite is enabled and the destination exists, remove it first
             if options.overwrite && dest_path.exists() {
-                if let Err(err) = std::fs::remove_file(&dest_path) {
-                    if err.kind() != std::io::ErrorKind::NotFound {
+                if let Err(err) = fs::remove_file(&dest_path) {
+                    if err.kind() != ErrorKind::NotFound {
                         return Err(Error::Io(err));
                     }
                 }
@@ -361,14 +415,15 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(())
 }
 
+/// Remove an existing destination file or directory tree.
 fn remove_destination(dest: &Path) -> Result<()> {
     if dest.is_file() {
-        std::fs::remove_file(dest).map_err(|source| Error::RemoveDestination {
+        fs::remove_file(dest).map_err(|source| Error::RemoveDestination {
             path: dest.to_path_buf(),
             source,
         })?;
     } else {
-        std::fs::remove_dir_all(dest).map_err(|source| Error::RemoveDestination {
+        fs::remove_dir_all(dest).map_err(|source| Error::RemoveDestination {
             path: dest.to_path_buf(),
             source,
         })?;
