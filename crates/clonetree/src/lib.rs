@@ -54,6 +54,28 @@
 //!   symlink creation (`symlink(2)` on Unix, `CreateSymbolicLink` on Windows).
 //! - **`SingleCall` strategy** (macOS only): The kernel's `clonefile(2)` preserves
 //!   symlinks automatically as part of the atomic directory clone.
+//!
+//! # Concurrency Considerations
+//!
+//! The validation checks (source exists, destination does not exist) and the actual
+//! clone operation are not atomic. This creates a time-of-check to time-of-use (TOCTOU)
+//! race window where:
+//!
+//! - Another process could create the destination after validation but before cloning
+//! - Another process could modify or delete the source during traversal
+//!
+//! **Strategy-specific behavior:**
+//!
+//! - **`SingleCall` strategy** (macOS): The `clonefile(2)` syscall is atomic—if the
+//!   destination is created by another process first, cloning will fail with an I/O error
+//!   rather than corrupting data.
+//!
+//! - **`FullTraversal` strategy**: Not atomic. Concurrent destination creation may result
+//!   in partial writes or merged directory contents. Source modifications during traversal
+//!   may cause some files to be skipped or fail to copy.
+//!
+//! For concurrent scenarios, callers should implement their own synchronization (e.g.,
+//! file locks, exclusive access to the destination parent directory).
 
 use std::{
     collections::HashSet,
@@ -531,16 +553,38 @@ fn absolutize(path: &Path) -> Result<PathBuf> {
 }
 
 /// Normalize a path by removing `.` and `..` components without touching symlinks.
+///
+/// Preserves the root component and does not pop past it. For example:
+/// - `/foo/../bar` becomes `/bar`
+/// - `/foo/../../bar` becomes `/bar` (cannot pop past root)
+/// - `foo/../bar` becomes `bar`
+/// - `foo/../../bar` becomes `../bar` (relative paths can accumulate `..`)
 fn clean_path(path: &Path) -> PathBuf {
     let mut cleaned = PathBuf::new();
+    let mut depth = 0usize; // Track depth below root for relative paths
+    let mut has_root = false;
 
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                cleaned.pop();
+                if depth > 0 {
+                    cleaned.pop();
+                    depth -= 1;
+                } else if !has_root {
+                    // Relative path going above starting point - preserve the ..
+                    cleaned.push(component);
+                }
+                // If we have a root but depth is 0, ignore the .. (can't go above root)
             }
-            other => cleaned.push(other),
+            Component::RootDir | Component::Prefix(_) => {
+                cleaned.push(component);
+                has_root = true;
+            }
+            Component::Normal(_) => {
+                cleaned.push(component);
+                depth += 1;
+            }
         }
     }
 
@@ -917,5 +961,49 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn clean_path_basic() {
+        // Basic normalization
+        assert_eq!(clean_path(Path::new("/foo/bar")), PathBuf::from("/foo/bar"));
+        assert_eq!(clean_path(Path::new("/foo/../bar")), PathBuf::from("/bar"));
+        assert_eq!(clean_path(Path::new("/foo/./bar")), PathBuf::from("/foo/bar"));
+        assert_eq!(
+            clean_path(Path::new("/foo/bar/../baz")),
+            PathBuf::from("/foo/baz")
+        );
+    }
+
+    #[test]
+    fn clean_path_preserves_root() {
+        // Cannot pop past root on absolute paths
+        assert_eq!(clean_path(Path::new("/../foo")), PathBuf::from("/foo"));
+        assert_eq!(clean_path(Path::new("/foo/../../bar")), PathBuf::from("/bar"));
+        assert_eq!(
+            clean_path(Path::new("/foo/../../../bar")),
+            PathBuf::from("/bar")
+        );
+        // Edge case: just root with parent dirs
+        assert_eq!(clean_path(Path::new("/..")), PathBuf::from("/"));
+        assert_eq!(clean_path(Path::new("/../..")), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn clean_path_relative() {
+        // Relative paths can accumulate .. components
+        assert_eq!(clean_path(Path::new("foo/bar")), PathBuf::from("foo/bar"));
+        assert_eq!(clean_path(Path::new("foo/../bar")), PathBuf::from("bar"));
+        assert_eq!(clean_path(Path::new("foo/../../bar")), PathBuf::from("../bar"));
+        assert_eq!(clean_path(Path::new("../foo")), PathBuf::from("../foo"));
+        assert_eq!(clean_path(Path::new("../../foo")), PathBuf::from("../../foo"));
+    }
+
+    #[test]
+    fn clean_path_empty_and_dot() {
+        assert_eq!(clean_path(Path::new("")), PathBuf::from(""));
+        assert_eq!(clean_path(Path::new(".")), PathBuf::from(""));
+        assert_eq!(clean_path(Path::new("..")), PathBuf::from(".."));
+        assert_eq!(clean_path(Path::new("./.")), PathBuf::from(""));
     }
 }
