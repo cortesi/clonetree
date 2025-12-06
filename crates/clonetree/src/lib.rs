@@ -433,9 +433,11 @@ fn remove_destination(dest: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn write_file(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap();

@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 authors = ["Aldo Cortesi <aldo@corte.si>"]
 description = "A copy-on-write directory library for Rust with fast reflink cloning"
@@ -15,7 +15,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-clonetree = { version = "0.0.1", path = "crates/clonetree" }
+clonetree = { version = "0.0.2", path = "crates/clonetree" }
 
 [workspace.lints.rust]
 missing_docs = "warn"
