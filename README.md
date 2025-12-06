@@ -30,6 +30,8 @@ Want to contribute? Have ideas or feature requests? Come tell us about it on
 
 * **Symlink preservation** — symbolic links are recreated with their original targets.
 
+* **Empty directory preservation** — empty directories are included in the clone.
+
 * **Pure Rust**, no unsafe code, minimal deps.
 
 ---

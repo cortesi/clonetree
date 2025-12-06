@@ -10,6 +10,7 @@
 //! - **Copy-on-Write Support**: Automatically uses reflinks when available on
 //!   supported filesystems (Btrfs, XFS, APFS, etc.)
 //! - **Symlink Preservation**: Symbolic links are recreated with their original targets
+//! - **Empty Directory Preservation**: Empty directories in the source tree are preserved
 //! - **Glob Filtering**: Include or exclude files using glob patterns
 //! - **Efficient Traversal**: Built on the `ignore` crate for fast directory walking
 //! - **Type-Safe Errors**: Comprehensive error handling with descriptive error types
@@ -484,6 +485,15 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
                 dest: dest_path.clone(),
                 source,
             })?;
+        } else if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+            // Create directories explicitly to preserve empty directories
+            if !created_dirs.contains(&dest_path) {
+                fs::create_dir_all(&dest_path).map_err(|source| Error::CreateDirectory {
+                    path: dest_path.clone(),
+                    source,
+                })?;
+                created_dirs.insert(dest_path);
+            }
         }
     }
 
@@ -669,7 +679,8 @@ mod tests {
         write_file(&src.join(".git/config"), "exclude");
 
         // Clone with exclude globs (! prefix excludes)
-        let opts = Options::new().glob("!target/**").glob("!.git/**");
+        // Note: !dir/ excludes the directory itself, !dir/** only excludes contents
+        let opts = Options::new().glob("!target/").glob("!.git/");
         clone_tree(&src, &dest, &opts)?;
 
         // Verify excludes worked
@@ -976,6 +987,100 @@ mod tests {
         assert_eq!(
             fs::read_link(dest.join("link_to_dir"))?,
             PathBuf::from("subdir")
+        );
+
+        Ok(())
+    }
+
+    /// Test that file permissions are preserved during cloning.
+    #[cfg(unix)]
+    #[test]
+    fn file_permissions_are_preserved() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new()?;
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&src)?;
+
+        // Create a file with specific permissions (executable)
+        let executable = src.join("script.sh");
+        write_file(&executable, "#!/bin/bash\necho hello");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
+
+        // Create a file with read-only permissions
+        let readonly = src.join("readonly.txt");
+        write_file(&readonly, "read only content");
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o444))?;
+
+        // Create a file with default permissions for comparison
+        let normal = src.join("normal.txt");
+        write_file(&normal, "normal content");
+
+        // Clone the tree
+        let opts = Options::new().strategy(CloneStrategy::FullTraversal);
+        clone_tree(&src, &dest, &opts)?;
+
+        // Check executable permissions
+        let dest_exec_perms = fs::metadata(dest.join("script.sh"))?.permissions().mode();
+        let src_exec_perms = fs::metadata(&executable)?.permissions().mode();
+        assert_eq!(
+            dest_exec_perms & 0o777,
+            src_exec_perms & 0o777,
+            "executable permissions should be preserved"
+        );
+
+        // Check read-only permissions
+        let dest_ro_perms = fs::metadata(dest.join("readonly.txt"))?.permissions().mode();
+        let src_ro_perms = fs::metadata(&readonly)?.permissions().mode();
+        assert_eq!(
+            dest_ro_perms & 0o777,
+            src_ro_perms & 0o777,
+            "read-only permissions should be preserved"
+        );
+
+        Ok(())
+    }
+
+    /// Test that empty directories are preserved during cloning.
+    #[test]
+    fn empty_directories_are_preserved() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&src)?;
+
+        // Create some empty directories
+        fs::create_dir(src.join("empty1"))?;
+        fs::create_dir(src.join("empty2"))?;
+        fs::create_dir_all(src.join("nested/empty"))?;
+
+        // Create a non-empty directory for comparison
+        fs::create_dir(src.join("nonempty"))?;
+        write_file(&src.join("nonempty/file.txt"), "content");
+
+        // Clone the tree
+        let opts = Options::new().strategy(CloneStrategy::FullTraversal);
+        clone_tree(&src, &dest, &opts)?;
+
+        // Check that empty directories exist
+        assert!(
+            dest.join("empty1").exists() && dest.join("empty1").is_dir(),
+            "empty1 directory should exist"
+        );
+        assert!(
+            dest.join("empty2").exists() && dest.join("empty2").is_dir(),
+            "empty2 directory should exist"
+        );
+        assert!(
+            dest.join("nested/empty").exists() && dest.join("nested/empty").is_dir(),
+            "nested/empty directory should exist"
+        );
+        assert!(
+            dest.join("nonempty/file.txt").exists(),
+            "nonempty directory with file should exist"
         );
 
         Ok(())

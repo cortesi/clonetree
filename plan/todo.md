@@ -11,15 +11,15 @@ These issues affect the fundamental correctness of clone operations.
   - Added `single_call_preserves_symlinks` test (SingleCall strategy, macOS)
   - Documented behavior in module docs and README
 
-- [ ] **Preserve empty directories**
-  - Modify traversal to create directories, not just file parents
-  - Process directory entries in addition to file entries (lib.rs:431)
-  - Add test case for empty directory preservation
+- [x] **Preserve empty directories**
+  - Added directory entry handling in `clone_tree_full_traversal`
+  - Added `empty_directories_are_preserved` test
+  - Documented in module docs and README
 
-- [ ] **Preserve file permissions/metadata**
-  - Copy file permissions after `reflink_or_copy` (Unix: mode bits)
-  - Consider timestamps (mtime/atime) preservation
-  - Add tests verifying permission preservation
+- [x] **Preserve file permissions/metadata**
+  - Verified: `reflink_or_copy` already preserves file permissions
+  - Added `file_permissions_are_preserved` test to confirm behavior
+  - Note: timestamps are NOT preserved (would need explicit handling)
 
 ## Stage 2: API Consistency
 
@@ -71,9 +71,9 @@ These issues affect predictability and user expectations.
   - [ ] Broken symlinks (future)
   - [ ] Symlink loops (future)
 
-- [ ] **Add empty directory test cases**
-  - Nested empty directories
-  - Mix of empty and non-empty directories
+- [x] **Add empty directory test cases**
+  - Nested empty directories (done in `empty_directories_are_preserved`)
+  - Mix of empty and non-empty directories (done in `empty_directories_are_preserved`)
 
 - [x] **Review and update README**
   - [ ] Accurate description of overwrite behavior
