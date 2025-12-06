@@ -30,11 +30,6 @@
 //!     .glob("**/*.rs")      // Include only Rust files
 //!     .glob("!target/**");  // Exclude target directory
 //! clone_tree("/source", "/dest", &options)?;
-//!
-//! // Clone with overwrite enabled
-//! let options = Options::new()
-//!     .overwrite(true);     // Allow overwriting existing files
-//! clone_tree("/source", "/existing_dest", &options)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -43,9 +38,11 @@
 //!
 //! The `clone_tree` function enforces the following constraints:
 //! - Source path must exist and be a directory
-//! - Destination path must not exist (unless `overwrite` option is enabled)
+//! - Destination path must not exist
 //!
 //! These constraints are validated before any filesystem operations begin.
+//! If you need to replace an existing destination, remove it first with
+//! [`std::fs::remove_dir_all`].
 //!
 //! # Symlink Handling
 //!
@@ -61,7 +58,6 @@
 use std::{
     collections::HashSet,
     env, fs, io,
-    io::ErrorKind,
     path::{Component, Path, PathBuf},
     result,
 };
@@ -96,16 +92,6 @@ pub enum Error {
         dest: PathBuf,
         #[source]
         /// Underlying I/O error from the copy operation.
-        source: io::Error,
-    },
-
-    #[error("Failed to remove existing destination at {path}: {source}")]
-    /// Removing a pre-existing destination entry failed.
-    RemoveDestination {
-        /// Path that could not be removed.
-        path: PathBuf,
-        #[source]
-        /// Underlying I/O error from removal.
         source: io::Error,
     },
 
@@ -186,6 +172,14 @@ pub enum Error {
         /// Canonicalized destination path.
         dest: PathBuf,
     },
+
+    #[error("Error while walking source tree: {source}")]
+    /// An error occurred while traversing the source directory tree.
+    Walk {
+        #[source]
+        /// Underlying error from the ignore crate's walker.
+        source: ignore::Error,
+    },
 }
 
 /// Convenience result type for clonetree operations.
@@ -212,8 +206,6 @@ pub enum CloneStrategy {
 pub struct Options {
     /// Glob patterns applied to the source tree (negated patterns exclude).
     globs: Vec<String>,
-    /// Whether existing destination entries should be overwritten.
-    overwrite: bool,
     /// How files and directories should be cloned.
     strategy: CloneStrategy,
 }
@@ -227,12 +219,6 @@ impl Options {
     /// Add a glob pattern to include or exclude when traversing.
     pub fn glob<S: Into<String>>(mut self, pattern: S) -> Self {
         self.globs.push(pattern.into());
-        self
-    }
-
-    /// Enable or disable overwriting of existing destination entries.
-    pub fn overwrite(mut self, overwrite: bool) -> Self {
-        self.overwrite = overwrite;
         self
     }
 
@@ -296,7 +282,7 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
         });
     }
 
-    if dest.exists() && !options.overwrite {
+    if dest.exists() {
         return Err(Error::DestinationExists {
             path: dest.to_path_buf(),
         });
@@ -340,21 +326,12 @@ fn should_use_single_call(options: &Options) -> Result<bool> {
 fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dest: Q,
-    options: &Options,
+    _options: &Options,
 ) -> Result<()> {
     let src = src.as_ref();
     let dest = dest.as_ref();
 
-    if dest.exists() {
-        if options.overwrite {
-            remove_destination(dest)?;
-        } else {
-            return Err(Error::DestinationExists {
-                path: dest.to_path_buf(),
-            });
-        }
-    }
-
+    // Create parent directory if needed
     if let Some(parent) = dest.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
@@ -390,13 +367,11 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
     let src = src.as_ref();
     let dest = dest.as_ref();
 
-    // Create destination directory if it doesn't exist
-    if !dest.exists() {
-        fs::create_dir_all(dest).map_err(|source| Error::CreateDirectory {
-            path: dest.to_path_buf(),
-            source,
-        })?;
-    }
+    // Create destination directory
+    fs::create_dir_all(dest).map_err(|source| Error::CreateDirectory {
+        path: dest.to_path_buf(),
+        source,
+    })?;
 
     // Track created directories to avoid redundant create_dir_all calls
     let mut created_dirs = HashSet::new();
@@ -426,7 +401,7 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
 
     // Walk the source directory
     for entry in builder.build() {
-        let entry = entry.map_err(|source| Error::Other(format!("Walk error: {source}")))?;
+        let entry = entry.map_err(|source| Error::Walk { source })?;
         let path = entry.path();
 
         // Skip the root directory itself
@@ -459,25 +434,12 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
                 source,
             })?;
 
-            // If overwrite is enabled and the destination exists, remove it first
-            if options.overwrite && dest_path.symlink_metadata().is_ok() {
-                remove_dest_entry(&dest_path)?;
-            }
-
             create_symlink(&target, &dest_path, path).map_err(|source| Error::Copy {
                 src: path.to_path_buf(),
                 dest: dest_path.clone(),
                 source,
             })?;
         } else if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            // If overwrite is enabled and the destination exists, remove it first
-            if options.overwrite && dest_path.exists() {
-                if let Err(err) = fs::remove_file(&dest_path) {
-                    if err.kind() != ErrorKind::NotFound {
-                        return Err(Error::Io(err));
-                    }
-                }
-            }
 
             // Copy file using reflink when available
             reflink_or_copy(path, &dest_path).map_err(|source| Error::Copy {
@@ -497,22 +459,6 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
         }
     }
 
-    Ok(())
-}
-
-/// Remove an existing destination file or directory tree.
-fn remove_destination(dest: &Path) -> Result<()> {
-    if dest.is_file() {
-        fs::remove_file(dest).map_err(|source| Error::RemoveDestination {
-            path: dest.to_path_buf(),
-            source,
-        })?;
-    } else {
-        fs::remove_dir_all(dest).map_err(|source| Error::RemoveDestination {
-            path: dest.to_path_buf(),
-            source,
-        })?;
-    }
     Ok(())
 }
 
@@ -543,25 +489,6 @@ fn create_symlink(target: &Path, dest: &Path, original_path: &Path) -> io::Resul
     } else {
         std::os::windows::fs::symlink_file(target, dest)
     }
-}
-
-/// Remove a destination entry (file, symlink, or directory) before overwriting.
-fn remove_dest_entry(dest: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(dest).map_err(|source| Error::RemoveDestination {
-        path: dest.to_path_buf(),
-        source,
-    })?;
-
-    if meta.is_dir() {
-        fs::remove_dir_all(dest)
-    } else {
-        // Files and symlinks
-        fs::remove_file(dest)
-    }
-    .map_err(|source| Error::RemoveDestination {
-        path: dest.to_path_buf(),
-        source,
-    })
 }
 
 /// Canonicalize an existing path, ensuring symlinks are resolved.
@@ -764,76 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn test_overwrite_existing_files() -> Result<()> {
-        let temp_dir = TempDir::new()?;
-        let src = temp_dir.path().join("src");
-        let dest = temp_dir.path().join("dest");
-
-        // Create source structure
-        fs::create_dir_all(&src)?;
-        write_file(&src.join("file1.txt"), "new_content1");
-        write_file(&src.join("file2.txt"), "new_content2");
-        fs::create_dir(src.join("subdir"))?;
-        write_file(&src.join("subdir/file3.txt"), "new_content3");
-
-        // Create destination with some existing files
-        fs::create_dir_all(&dest)?;
-        write_file(&dest.join("file1.txt"), "old_content1");
-        write_file(&dest.join("existing_file.txt"), "should_remain");
-        fs::create_dir(dest.join("subdir"))?;
-        write_file(&dest.join("subdir/file3.txt"), "old_content3");
-        write_file(&dest.join("subdir/existing_file.txt"), "should_remain");
-
-        // Clone with overwrite enabled
-        let opts = Options::new().overwrite(true);
-
-        let use_single_call = super::should_use_single_call(&opts).unwrap_or(false);
-        clone_tree(&src, &dest, &opts)?;
-
-        // Verify overwrites happened
-        assert!(dest.join("file1.txt").exists(), "file1.txt missing");
-        assert_eq!(fs::read_to_string(dest.join("file1.txt"))?, "new_content1");
-        assert!(dest.join("file2.txt").exists(), "file2.txt missing");
-        assert_eq!(fs::read_to_string(dest.join("file2.txt"))?, "new_content2");
-        assert!(dest.join("subdir/file3.txt").exists(), "file3.txt missing");
-        assert_eq!(
-            fs::read_to_string(dest.join("subdir/file3.txt"))?,
-            "new_content3"
-        );
-
-        // Verify existing files that weren't in source remain untouched
-        if use_single_call {
-            assert!(
-                !dest.join("existing_file.txt").exists(),
-                "single-call clone should replace destination tree"
-            );
-            assert!(
-                !dest.join("subdir/existing_file.txt").exists(),
-                "single-call clone should replace destination tree"
-            );
-        } else {
-            assert!(
-                dest.join("existing_file.txt").exists(),
-                "existing_file.txt missing"
-            );
-            assert_eq!(
-                fs::read_to_string(dest.join("existing_file.txt"))?,
-                "should_remain"
-            );
-            assert!(
-                dest.join("subdir/existing_file.txt").exists(),
-                "subdir/existing_file.txt missing"
-            );
-            assert_eq!(
-                fs::read_to_string(dest.join("subdir/existing_file.txt"))?,
-                "should_remain"
-            );
-        }
-
-        Ok(())
-    }
-
-    #[test]
     fn single_call_strategy_rejected_with_globs() {
         let opts = Options::new()
             .glob("**/*.rs")
@@ -846,30 +703,6 @@ mod tests {
 
         let result = clone_tree(&src, &dest, &opts);
         assert!(matches!(result, Err(Error::IncompatibleOptions { .. })));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn single_call_overwrite_replaces_destination_dir() -> Result<()> {
-        let temp_dir = TempDir::new()?;
-        let src = temp_dir.path().join("src");
-        let dest = temp_dir.path().join("dest");
-
-        fs::create_dir_all(&src)?;
-        write_file(&src.join("file.txt"), "new");
-
-        fs::create_dir_all(&dest)?;
-        write_file(&dest.join("file.txt"), "old");
-        write_file(&dest.join("old_only.txt"), "stay?");
-
-        let opts = Options::new()
-            .strategy(CloneStrategy::SingleCall)
-            .overwrite(true);
-        clone_tree(&src, &dest, &opts)?;
-
-        assert_eq!(fs::read_to_string(dest.join("file.txt"))?, "new");
-        assert!(!dest.join("old_only.txt").exists());
-        Ok(())
     }
 
     #[test]
@@ -891,7 +724,7 @@ mod tests {
         let dest = src.join("nested/dest");
         mkdir(&src);
 
-        let opts = Options::new().overwrite(true);
+        let opts = Options::new();
         let result = clone_tree(&src, &dest, &opts);
 
         assert!(matches!(result, Err(Error::DestinationInsideSource { .. })));
@@ -904,7 +737,7 @@ mod tests {
         let src = dest.join("inner/src");
         mkdir(&src);
 
-        let opts = Options::new().overwrite(true);
+        let opts = Options::new();
         let result = clone_tree(&src, &dest, &opts);
 
         assert!(matches!(result, Err(Error::SourceInsideDestination { .. })));

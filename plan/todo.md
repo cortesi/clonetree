@@ -25,24 +25,17 @@ These issues affect the fundamental correctness of clone operations.
 
 These issues affect predictability and user expectations.
 
-- [ ] **Document or unify overwrite semantics**
-  - SingleCall: replaces entire destination tree
-  - FullTraversal: merges, only overwrites conflicting files
-  - Option A: Document the difference clearly in API docs and README
-  - Option B: Add an `OverwriteMode` enum (`Replace` vs `Merge`)
-  - Update README to reflect accurate overwrite behavior
+- [x] **Simplify overwrite semantics**
+  - REMOVED: `Options::overwrite()` no longer exists
+  - Destination must not exist; caller should delete first if needed
+  - Documented in module docs validation section
 
-- [ ] **Add `WalkError` variant to Error enum**
-  - Replace `Error::Other` for walk errors (lib.rs:416) with dedicated variant
-  - Include path context in the error
-  - Preserve underlying `ignore::Error` as source
+- [x] **Add `WalkError` variant to Error enum**
+  - Added `Error::Walk` variant with `ignore::Error` source
+  - Updated walk error handling to use new variant
+  - Preserves underlying error for proper error chain
 
 ## Stage 3: CLI Improvements
-
-- [ ] **Add `--overwrite` flag to ctree**
-  - Add `-o, --overwrite` argument to Args struct
-  - Wire through to `Options::overwrite()`
-  - Update CLI help text
 
 - [ ] **Add `--dry-run` flag to ctree**
   - Show what would be copied without copying
@@ -76,7 +69,6 @@ These issues affect predictability and user expectations.
   - Mix of empty and non-empty directories (done in `empty_directories_are_preserved`)
 
 - [x] **Review and update README**
-  - [ ] Accurate description of overwrite behavior
   - [x] Document symlink handling policy
   - [ ] Document metadata preservation policy
 
