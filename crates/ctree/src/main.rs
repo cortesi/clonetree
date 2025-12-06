@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use clap::Parser;
-use clonetree::{clone_tree, Options};
+use clap::{Parser, ValueEnum};
+use clonetree::{clone_tree, CloneStrategy, Options};
 
 #[derive(Parser)]
 #[command(
@@ -20,16 +20,37 @@ struct Args {
     #[arg(short = 'g', long = "glob", value_name = "GLOB")]
     globs: Vec<String>,
 
+    /// Cloning strategy
+    #[arg(long, value_enum, default_value_t = StrategyArg::Auto)]
+    strategy: StrategyArg,
+
     /// Suppress progress output
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum StrategyArg {
+    Auto,
+    SingleCall,
+    FullTraversal,
+}
+
+impl From<StrategyArg> for CloneStrategy {
+    fn from(arg: StrategyArg) -> Self {
+        match arg {
+            StrategyArg::Auto => CloneStrategy::Auto,
+            StrategyArg::SingleCall => CloneStrategy::SingleCall,
+            StrategyArg::FullTraversal => CloneStrategy::FullTraversal,
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
     // Build options
-    let mut options = Options::new();
+    let mut options = Options::new().strategy(args.strategy.into());
     for glob in args.globs {
         options = options.glob(glob);
     }

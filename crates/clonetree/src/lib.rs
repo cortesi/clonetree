@@ -46,7 +46,7 @@
 //! These constraints are validated before any filesystem operations begin.
 
 use ignore::{overrides::OverrideBuilder, WalkBuilder};
-use reflink_copy::reflink_or_copy;
+use reflink_copy::{reflink, reflink_or_copy};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -71,6 +71,13 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    #[error("Failed to remove existing destination at {path}: {source}")]
+    RemoveDestination {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("Invalid glob pattern '{pattern}': {source}")]
     InvalidGlob {
         pattern: String,
@@ -81,6 +88,9 @@ pub enum Error {
     #[error("Destination already exists: {path}")]
     DestinationExists { path: PathBuf },
 
+    #[error("Destination is not a directory: {path}")]
+    DestinationNotDirectory { path: PathBuf },
+
     #[error("Source is not a directory: {path}")]
     SourceNotDirectory { path: PathBuf },
 
@@ -89,14 +99,41 @@ pub enum Error {
 
     #[error("Operation error: {0}")]
     Other(String),
+
+    #[error("Single-call cloning is only available on macOS")]
+    SingleCallUnsupported,
+
+    #[error("Single-call cloning cannot be combined with glob filters: {patterns:?}")]
+    IncompatibleOptions { patterns: Vec<String> },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneStrategy {
+    /// Choose the fastest supported strategy. On macOS this prefers a
+    /// single `clonefile` call when possible; otherwise it falls back to the
+    /// full directory traversal used on other platforms.
+    Auto,
+    /// Force a single system call to clone the root directory (macOS only).
+    /// This cannot be combined with glob filters because the kernel copies the
+    /// entire tree.
+    SingleCall,
+    /// Walk the tree in userspace and reflink each file individually.
+    FullTraversal,
+}
+
+impl Default for CloneStrategy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Options {
     globs: Vec<String>,
     overwrite: bool,
+    strategy: CloneStrategy,
 }
 
 impl Options {
@@ -111,6 +148,11 @@ impl Options {
 
     pub fn overwrite(mut self, overwrite: bool) -> Self {
         self.overwrite = overwrite;
+        self
+    }
+
+    pub fn strategy(mut self, strategy: CloneStrategy) -> Self {
+        self.strategy = strategy;
         self
     }
 }
@@ -137,12 +179,102 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
         });
     }
 
-    // Validate destination
+    // Validate destination state early to keep semantics predictable
+    if dest.exists() && !dest.is_dir() {
+        return Err(Error::DestinationNotDirectory {
+            path: dest.to_path_buf(),
+        });
+    }
+
     if dest.exists() && !options.overwrite {
         return Err(Error::DestinationExists {
             path: dest.to_path_buf(),
         });
     }
+
+    let use_single_call = should_use_single_call(&options)?;
+
+    if use_single_call {
+        return clone_tree_single_call(src, dest, options);
+    }
+
+    clone_tree_full_traversal(src, dest, options)
+}
+
+fn should_use_single_call(options: &Options) -> Result<bool> {
+    if !options.globs.is_empty() {
+        if matches!(options.strategy, CloneStrategy::SingleCall) {
+            return Err(Error::IncompatibleOptions {
+                patterns: options.globs.clone(),
+            });
+        }
+        return Ok(false);
+    }
+
+    match options.strategy {
+        CloneStrategy::SingleCall => {
+            if cfg!(target_os = "macos") {
+                Ok(true)
+            } else {
+                Err(Error::SingleCallUnsupported)
+            }
+        }
+        CloneStrategy::Auto => Ok(cfg!(target_os = "macos")),
+        CloneStrategy::FullTraversal => Ok(false),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
+    src: P,
+    dest: Q,
+    options: &Options,
+) -> Result<()> {
+    let src = src.as_ref();
+    let dest = dest.as_ref();
+
+    if dest.exists() {
+        if options.overwrite {
+            remove_destination(dest)?;
+        } else {
+            return Err(Error::DestinationExists {
+                path: dest.to_path_buf(),
+            });
+        }
+    }
+
+    if let Some(parent) = dest.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+
+    reflink(src, dest).map_err(|source| Error::Copy {
+        src: src.to_path_buf(),
+        dest: dest.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clone_tree_single_call<P: AsRef<Path>, Q: AsRef<Path>>(
+    _src: P,
+    _dest: Q,
+    _options: &Options,
+) -> Result<()> {
+    Err(Error::SingleCallUnsupported)
+}
+
+fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
+    src: P,
+    dest: Q,
+    options: &Options,
+) -> Result<()> {
+    let src = src.as_ref();
+    let dest = dest.as_ref();
 
     // Create destination directory if it doesn't exist
     if !dest.exists() {
@@ -210,7 +342,11 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
 
             // If overwrite is enabled and the destination exists, remove it first
             if options.overwrite && dest_path.exists() {
-                std::fs::remove_file(&dest_path).map_err(Error::Io)?;
+                if let Err(err) = std::fs::remove_file(&dest_path) {
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        return Err(Error::Io(err));
+                    }
+                }
             }
 
             // Copy file using reflink when available
@@ -225,11 +361,30 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(())
 }
 
+fn remove_destination(dest: &Path) -> Result<()> {
+    if dest.is_file() {
+        std::fs::remove_file(dest).map_err(|source| Error::RemoveDestination {
+            path: dest.to_path_buf(),
+            source,
+        })?;
+    } else {
+        std::fs::remove_dir_all(dest).map_err(|source| Error::RemoveDestination {
+            path: dest.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+    }
 
     #[test]
     fn test_clone_tree_basic() -> Result<()> {
@@ -239,9 +394,9 @@ mod tests {
 
         // Create source structure
         fs::create_dir_all(&src)?;
-        fs::write(src.join("file1.txt"), "content1")?;
+        write_file(&src.join("file1.txt"), "content1");
         fs::create_dir(src.join("subdir"))?;
-        fs::write(src.join("subdir/file2.txt"), "content2")?;
+        write_file(&src.join("subdir/file2.txt"), "content2");
 
         // Clone the tree
         let opts = Options::new();
@@ -271,7 +426,7 @@ mod tests {
         fs::create_dir(src.join("target"))?;
         fs::write(src.join("target/build.out"), "exclude")?;
         fs::create_dir(src.join(".git"))?;
-        fs::write(src.join(".git/config"), "exclude")?;
+        write_file(&src.join(".git/config"), "exclude");
 
         // Clone with exclude globs (! prefix excludes)
         let opts = Options::new().glob("!target/**").glob("!.git/**");
@@ -293,12 +448,12 @@ mod tests {
 
         // Create source structure
         fs::create_dir_all(&src)?;
-        fs::write(src.join("include1.txt"), "include")?;
-        fs::write(src.join("include2.txt"), "include")?;
-        fs::write(src.join("exclude.log"), "exclude")?;
+        write_file(&src.join("include1.txt"), "include");
+        write_file(&src.join("include2.txt"), "include");
+        write_file(&src.join("exclude.log"), "exclude");
         fs::create_dir(src.join("data"))?;
-        fs::write(src.join("data/file.txt"), "include")?;
-        fs::write(src.join("data/debug.log"), "exclude")?;
+        write_file(&src.join("data/file.txt"), "include");
+        write_file(&src.join("data/debug.log"), "exclude");
 
         // Clone with positive globs (only include .txt files)
         let opts = Options::new().glob("**/*.txt");
@@ -365,41 +520,104 @@ mod tests {
 
         // Create source structure
         fs::create_dir_all(&src)?;
-        fs::write(src.join("file1.txt"), "new_content1")?;
-        fs::write(src.join("file2.txt"), "new_content2")?;
+        write_file(&src.join("file1.txt"), "new_content1");
+        write_file(&src.join("file2.txt"), "new_content2");
         fs::create_dir(src.join("subdir"))?;
-        fs::write(src.join("subdir/file3.txt"), "new_content3")?;
+        write_file(&src.join("subdir/file3.txt"), "new_content3");
 
         // Create destination with some existing files
         fs::create_dir_all(&dest)?;
-        fs::write(dest.join("file1.txt"), "old_content1")?;
-        fs::write(dest.join("existing_file.txt"), "should_remain")?;
+        write_file(&dest.join("file1.txt"), "old_content1");
+        write_file(&dest.join("existing_file.txt"), "should_remain");
         fs::create_dir(dest.join("subdir"))?;
-        fs::write(dest.join("subdir/file3.txt"), "old_content3")?;
-        fs::write(dest.join("subdir/existing_file.txt"), "should_remain")?;
+        write_file(&dest.join("subdir/file3.txt"), "old_content3");
+        write_file(&dest.join("subdir/existing_file.txt"), "should_remain");
 
         // Clone with overwrite enabled
         let opts = Options::new().overwrite(true);
+
+        let use_single_call = super::should_use_single_call(&opts).unwrap_or(false);
         clone_tree(&src, &dest, &opts)?;
 
         // Verify overwrites happened
+        assert!(dest.join("file1.txt").exists(), "file1.txt missing");
         assert_eq!(fs::read_to_string(dest.join("file1.txt"))?, "new_content1");
+        assert!(dest.join("file2.txt").exists(), "file2.txt missing");
         assert_eq!(fs::read_to_string(dest.join("file2.txt"))?, "new_content2");
+        assert!(dest.join("subdir/file3.txt").exists(), "file3.txt missing");
         assert_eq!(
             fs::read_to_string(dest.join("subdir/file3.txt"))?,
             "new_content3"
         );
 
         // Verify existing files that weren't in source remain untouched
-        assert_eq!(
-            fs::read_to_string(dest.join("existing_file.txt"))?,
-            "should_remain"
-        );
-        assert_eq!(
-            fs::read_to_string(dest.join("subdir/existing_file.txt"))?,
-            "should_remain"
-        );
+        if use_single_call {
+            assert!(
+                !dest.join("existing_file.txt").exists(),
+                "single-call clone should replace destination tree"
+            );
+            assert!(
+                !dest.join("subdir/existing_file.txt").exists(),
+                "single-call clone should replace destination tree"
+            );
+        } else {
+            assert!(
+                dest.join("existing_file.txt").exists(),
+                "existing_file.txt missing"
+            );
+            assert_eq!(
+                fs::read_to_string(dest.join("existing_file.txt"))?,
+                "should_remain"
+            );
+            assert!(
+                dest.join("subdir/existing_file.txt").exists(),
+                "subdir/existing_file.txt missing"
+            );
+            assert_eq!(
+                fs::read_to_string(dest.join("subdir/existing_file.txt"))?,
+                "should_remain"
+            );
+        }
 
+        Ok(())
+    }
+
+    #[test]
+    fn single_call_strategy_rejected_with_globs() {
+        let opts = Options::new()
+            .glob("**/*.rs")
+            .strategy(CloneStrategy::SingleCall);
+        let temp_dir = TempDir::new().unwrap();
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&src).unwrap();
+
+        let result = clone_tree(&src, &dest, &opts);
+        assert!(matches!(result, Err(Error::IncompatibleOptions { .. })));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn single_call_overwrite_replaces_destination_dir() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let src = temp_dir.path().join("src");
+        let dest = temp_dir.path().join("dest");
+
+        fs::create_dir_all(&src)?;
+        write_file(&src.join("file.txt"), "new");
+
+        fs::create_dir_all(&dest)?;
+        write_file(&dest.join("file.txt"), "old");
+        write_file(&dest.join("old_only.txt"), "stay?");
+
+        let opts = Options::new()
+            .strategy(CloneStrategy::SingleCall)
+            .overwrite(true);
+        clone_tree(&src, &dest, &opts)?;
+
+        assert_eq!(fs::read_to_string(dest.join("file.txt"))?, "new");
+        assert!(!dest.join("old_only.txt").exists());
         Ok(())
     }
 }

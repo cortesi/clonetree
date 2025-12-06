@@ -100,7 +100,8 @@ ctree <SRC> <DEST> [OPTIONS]
 
 OPTIONS:
   -g, --glob <GLOB>      Match or exclude glob (repeatable)
-      --no-reflink       Disable reflink, perform a regular copy
+      --strategy <auto|single-call|full-traversal>
+                         Cloning strategy (defaults to auto)
   -q, --quiet            Suppress progress output
   -h, --help             Show this help
 ```
@@ -112,6 +113,17 @@ ctree . ./sandbox \
   --glob '!target/**' \
   --glob '!.git/**'
 ```
+
+### Strategies
+
+`clonetree` offers three strategies:
+
+* `auto` (default): on macOS/APFS it issues a **single `clonefile` call** on the
+  root directory (fastest, atomic, COW). Else it falls back to traversal.
+* `single-call`: force the one-shot clone (macOS only; destination must not
+  exist; incompatible with glob filters).
+* `full-traversal`: user-space walk that reflinks each file individually (works
+  everywhere and honors glob filters).
 
 ---
 
@@ -129,4 +141,3 @@ Via [reflink-copy](https://crates.io/crates/reflink-copy)
 | Linux 5.13+ / overlayfs        | ✅                 | `remap_file_range`                | COW clone          |
 | Windows Server 2016+ / ReFS    | ✅                 | `FSCTL_DUPLICATE_EXTENTS_TO_FILE` | COW clone          |
 | ext4 (Ubuntu/Fedora default)   | ❌                 | –                                 | Byte‑for‑byte copy |
-

@@ -1,4 +1,4 @@
-use clonetree::{clone_tree, Options};
+use clonetree::{clone_tree, CloneStrategy, Options};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::fs;
 use tempfile::TempDir;
@@ -97,30 +97,72 @@ fn benchmark_clone_tree(c: &mut Criterion) {
             config.file_size,
         );
 
-        group.bench_with_input(
-            BenchmarkId::new(config.name, format!("{total_files}_files")),
-            &(config, &temp_dir, &src),
-            |b, &(_config, temp_dir, src)| {
-                b.iter_with_setup(
-                    || {
-                        // Just create a fresh destination directory for each iteration
-                        let dest = temp_dir.path().join("dest");
-                        // Remove destination if it exists from previous iteration
-                        if dest.exists() {
-                            fs::remove_dir_all(&dest).unwrap();
-                        }
-                        dest
-                    },
-                    |dest| {
-                        let options = Options::new();
-                        clone_tree(black_box(src), black_box(&dest), black_box(&options)).unwrap();
-                    },
-                );
-            },
+        bench_with_strategy(
+            &mut group,
+            config,
+            total_files,
+            &temp_dir,
+            &src,
+            CloneStrategy::FullTraversal,
+            "full_traversal",
+        );
+
+        bench_with_strategy(
+            &mut group,
+            config,
+            total_files,
+            &temp_dir,
+            &src,
+            CloneStrategy::Auto,
+            "auto",
+        );
+
+        #[cfg(target_os = "macos")]
+        bench_with_strategy(
+            &mut group,
+            config,
+            total_files,
+            &temp_dir,
+            &src,
+            CloneStrategy::SingleCall,
+            "single_call",
         );
     }
 
     group.finish();
+}
+
+fn bench_with_strategy(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    config: &BenchConfig,
+    total_files: usize,
+    temp_dir: &TempDir,
+    src: &std::path::Path,
+    strategy: CloneStrategy,
+    label: &str,
+) {
+    group.bench_with_input(
+        BenchmarkId::new(
+            format!("{}-{label}", config.name),
+            format!("{total_files}_files"),
+        ),
+        &(temp_dir, src),
+        |b, &(temp_dir, src)| {
+            b.iter_with_setup(
+                || {
+                    let dest = temp_dir.path().join(format!("dest_{label}"));
+                    if dest.exists() {
+                        fs::remove_dir_all(&dest).unwrap();
+                    }
+                    dest
+                },
+                |dest| {
+                    let options = Options::new().strategy(strategy);
+                    clone_tree(black_box(src), black_box(&dest), black_box(&options)).unwrap();
+                },
+            );
+        },
+    );
 }
 
 fn calculate_total_files(files_per_level: usize, depth: usize, dirs_per_level: usize) -> usize {
