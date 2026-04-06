@@ -462,7 +462,6 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
                 source,
             })?;
         } else if entry.file_type().is_some_and(|ft| ft.is_file()) {
-
             // Copy file using reflink when available
             reflink_or_copy(path, &dest_path).map_err(|source| Error::Copy {
                 src: path.to_path_buf(),
@@ -817,14 +816,26 @@ mod tests {
         // Verify symlink to file was recreated as a symlink
         let link_meta = fs::symlink_metadata(dest.join("link_to_file.txt"))?;
         assert!(link_meta.file_type().is_symlink(), "should be a symlink");
-        assert_eq!(fs::read_link(dest.join("link_to_file.txt"))?, PathBuf::from("file.txt"));
+        assert_eq!(
+            fs::read_link(dest.join("link_to_file.txt"))?,
+            PathBuf::from("file.txt")
+        );
         // Verify the symlink works
-        assert_eq!(fs::read_to_string(dest.join("link_to_file.txt"))?, "content");
+        assert_eq!(
+            fs::read_to_string(dest.join("link_to_file.txt"))?,
+            "content"
+        );
 
         // Verify symlink to directory was recreated
         let dir_link_meta = fs::symlink_metadata(dest.join("link_to_dir"))?;
-        assert!(dir_link_meta.file_type().is_symlink(), "should be a symlink");
-        assert_eq!(fs::read_link(dest.join("link_to_dir"))?, PathBuf::from("subdir"));
+        assert!(
+            dir_link_meta.file_type().is_symlink(),
+            "should be a symlink"
+        );
+        assert_eq!(
+            fs::read_link(dest.join("link_to_dir"))?,
+            PathBuf::from("subdir")
+        );
 
         Ok(())
     }
@@ -860,7 +871,10 @@ mod tests {
         );
 
         let dir_link_meta = fs::symlink_metadata(dest.join("link_to_dir"))?;
-        assert!(dir_link_meta.file_type().is_symlink(), "should be a symlink");
+        assert!(
+            dir_link_meta.file_type().is_symlink(),
+            "should be a symlink"
+        );
         assert_eq!(
             fs::read_link(dest.join("link_to_dir"))?,
             PathBuf::from("subdir")
@@ -909,7 +923,9 @@ mod tests {
         );
 
         // Check read-only permissions
-        let dest_ro_perms = fs::metadata(dest.join("readonly.txt"))?.permissions().mode();
+        let dest_ro_perms = fs::metadata(dest.join("readonly.txt"))?
+            .permissions()
+            .mode();
         let src_ro_perms = fs::metadata(&readonly)?.permissions().mode();
         assert_eq!(
             dest_ro_perms & 0o777,
@@ -968,7 +984,10 @@ mod tests {
         // Basic normalization
         assert_eq!(clean_path(Path::new("/foo/bar")), PathBuf::from("/foo/bar"));
         assert_eq!(clean_path(Path::new("/foo/../bar")), PathBuf::from("/bar"));
-        assert_eq!(clean_path(Path::new("/foo/./bar")), PathBuf::from("/foo/bar"));
+        assert_eq!(
+            clean_path(Path::new("/foo/./bar")),
+            PathBuf::from("/foo/bar")
+        );
         assert_eq!(
             clean_path(Path::new("/foo/bar/../baz")),
             PathBuf::from("/foo/baz")
@@ -979,7 +998,10 @@ mod tests {
     fn clean_path_preserves_root() {
         // Cannot pop past root on absolute paths
         assert_eq!(clean_path(Path::new("/../foo")), PathBuf::from("/foo"));
-        assert_eq!(clean_path(Path::new("/foo/../../bar")), PathBuf::from("/bar"));
+        assert_eq!(
+            clean_path(Path::new("/foo/../../bar")),
+            PathBuf::from("/bar")
+        );
         assert_eq!(
             clean_path(Path::new("/foo/../../../bar")),
             PathBuf::from("/bar")
@@ -994,9 +1016,15 @@ mod tests {
         // Relative paths can accumulate .. components
         assert_eq!(clean_path(Path::new("foo/bar")), PathBuf::from("foo/bar"));
         assert_eq!(clean_path(Path::new("foo/../bar")), PathBuf::from("bar"));
-        assert_eq!(clean_path(Path::new("foo/../../bar")), PathBuf::from("../bar"));
+        assert_eq!(
+            clean_path(Path::new("foo/../../bar")),
+            PathBuf::from("../bar")
+        );
         assert_eq!(clean_path(Path::new("../foo")), PathBuf::from("../foo"));
-        assert_eq!(clean_path(Path::new("../../foo")), PathBuf::from("../../foo"));
+        assert_eq!(
+            clean_path(Path::new("../../foo")),
+            PathBuf::from("../../foo")
+        );
     }
 
     #[test]
