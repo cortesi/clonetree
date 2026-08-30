@@ -1,4 +1,5 @@
-//! A library for efficiently cloning directory trees with copy-on-write support.
+//! A library for efficiently cloning directory trees with copy-on-write
+//! support.
 //!
 //! This crate provides functionality to clone entire directory structures while
 //! leveraging filesystem-level copy-on-write (CoW) capabilities when available
@@ -9,16 +10,20 @@
 //!
 //! - **Copy-on-Write Support**: Automatically uses reflinks when available on
 //!   supported filesystems (Btrfs, XFS, APFS, etc.)
-//! - **Symlink Preservation**: Symbolic links are recreated with their original targets
-//! - **Empty Directory Preservation**: Empty directories in the source tree are preserved
+//! - **Symlink Preservation**: Symbolic links are recreated with their original
+//!   targets
+//! - **Empty Directory Preservation**: Empty directories in the source tree are
+//!   preserved
 //! - **Glob Filtering**: Include or exclude files using glob patterns
-//! - **Efficient Traversal**: Built on the `ignore` crate for fast directory walking
-//! - **Type-Safe Errors**: Comprehensive error handling with descriptive error types
+//! - **Efficient Traversal**: Built on the `ignore` crate for fast directory
+//!   walking
+//! - **Type-Safe Errors**: Comprehensive error handling with descriptive error
+//!   types
 //!
 //! # Example
 //!
 //! ```no_run
-//! use clonetree::{clone_tree, Options};
+//! use clonetree::{Options, clone_tree};
 //!
 //! # fn main() -> clonetree::Result<()> {
 //! // Clone a directory tree
@@ -28,7 +33,7 @@
 //! // Clone with glob filters
 //! let options = Options::new()
 //!     .glob("**/*.rs")      // Include only Rust files
-//!     .glob("!target/**");  // Exclude target directory
+//!     .glob("!target/**"); // Exclude target directory
 //! clone_tree("/source", "/dest", &options)?;
 //! # Ok(())
 //! # }
@@ -47,35 +52,37 @@
 //! # Symlink Handling
 //!
 //! Symbolic links in the source tree are preserved as symbolic links in the
-//! destination. The link targets are copied verbatim (not resolved), so relative
-//! symlinks maintain their relative paths.
+//! destination. The link targets are copied verbatim (not resolved), so
+//! relative symlinks maintain their relative paths.
 //!
 //! - **`FullTraversal` strategy**: Symlinks are recreated using platform-native
 //!   symlink creation (`symlink(2)` on Unix, `CreateSymbolicLink` on Windows).
-//! - **`SingleCall` strategy** (macOS only): The kernel's `clonefile(2)` preserves
-//!   symlinks automatically as part of the atomic directory clone.
+//! - **`SingleCall` strategy** (macOS only): The kernel's `clonefile(2)`
+//!   preserves symlinks automatically as part of the atomic directory clone.
 //!
 //! # Concurrency Considerations
 //!
-//! The validation checks (source exists, destination does not exist) and the actual
-//! clone operation are not atomic. This creates a time-of-check to time-of-use (TOCTOU)
-//! race window where:
+//! The validation checks (source exists, destination does not exist) and the
+//! actual clone operation are not atomic. This creates a time-of-check to
+//! time-of-use (TOCTOU) race window where:
 //!
-//! - Another process could create the destination after validation but before cloning
+//! - Another process could create the destination after validation but before
+//!   cloning
 //! - Another process could modify or delete the source during traversal
 //!
 //! **Strategy-specific behavior:**
 //!
-//! - **`SingleCall` strategy** (macOS): The `clonefile(2)` syscall is atomic—if the
-//!   destination is created by another process first, cloning will fail with an I/O error
-//!   rather than corrupting data.
+//! - **`SingleCall` strategy** (macOS): The `clonefile(2)` syscall is atomic—if
+//!   the destination is created by another process first, cloning will fail
+//!   with an I/O error rather than corrupting data.
 //!
-//! - **`FullTraversal` strategy**: Not atomic. Concurrent destination creation may result
-//!   in partial writes or merged directory contents. Source modifications during traversal
-//!   may cause some files to be skipped or fail to copy.
+//! - **`FullTraversal` strategy**: Not atomic. Concurrent destination creation
+//!   may result in partial writes or merged directory contents. Source
+//!   modifications during traversal may cause some files to be skipped or fail
+//!   to copy.
 //!
-//! For concurrent scenarios, callers should implement their own synchronization (e.g.,
-//! file locks, exclusive access to the destination parent directory).
+//! For concurrent scenarios, callers should implement their own synchronization
+//! (e.g., file locks, exclusive access to the destination parent directory).
 
 use std::{
     collections::HashSet,
@@ -84,7 +91,7 @@ use std::{
     result,
 };
 
-use ignore::{overrides::OverrideBuilder, WalkBuilder};
+use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use reflink_copy::{reflink, reflink_or_copy};
 use thiserror::Error;
 
@@ -319,7 +326,8 @@ pub fn clone_tree<P: AsRef<Path>, Q: AsRef<Path>>(
     clone_tree_full_traversal(src, dest, options)
 }
 
-/// Determine whether to use the single-call strategy based on options and platform.
+/// Determine whether to use the single-call strategy based on options and
+/// platform.
 fn should_use_single_call(options: &Options) -> Result<bool> {
     if !options.globs.is_empty() {
         if matches!(options.strategy, CloneStrategy::SingleCall) {
@@ -485,7 +493,8 @@ fn clone_tree_full_traversal<P: AsRef<Path>, Q: AsRef<Path>>(
 
 /// Create a symbolic link at `dest` pointing to `target`.
 ///
-/// The `original_path` is used on Windows to determine if the target is a directory.
+/// The `original_path` is used on Windows to determine if the target is a
+/// directory.
 #[cfg(unix)]
 #[allow(clippy::absolute_paths)] // Platform-specific import not worth conditional use
 fn create_symlink(target: &Path, dest: &Path, _original_path: &Path) -> io::Result<()> {
@@ -494,7 +503,8 @@ fn create_symlink(target: &Path, dest: &Path, _original_path: &Path) -> io::Resu
 
 /// Create a symbolic link at `dest` pointing to `target`.
 ///
-/// The `original_path` is used on Windows to determine if the target is a directory.
+/// The `original_path` is used on Windows to determine if the target is a
+/// directory.
 #[cfg(windows)]
 #[allow(clippy::absolute_paths)] // Platform-specific import not worth conditional use
 fn create_symlink(target: &Path, dest: &Path, original_path: &Path) -> io::Result<()> {
@@ -517,7 +527,8 @@ fn canonicalize_existing(path: &Path) -> Result<PathBuf> {
     fs::canonicalize(path).map_err(Error::from)
 }
 
-/// Convert a path to an absolute, cleaned form even if the final component does not yet exist.
+/// Convert a path to an absolute, cleaned form even if the final component does
+/// not yet exist.
 fn canonicalize_for_destination(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         return canonicalize_existing(path);
@@ -540,7 +551,8 @@ fn canonicalize_for_destination(path: &Path) -> Result<PathBuf> {
     Ok(clean_path(&resolved_existing.join(remainder)))
 }
 
-/// Produce an absolute path with `.`/`..` removed, based on the current directory.
+/// Produce an absolute path with `.`/`..` removed, based on the current
+/// directory.
 fn absolutize(path: &Path) -> Result<PathBuf> {
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -551,7 +563,8 @@ fn absolutize(path: &Path) -> Result<PathBuf> {
     Ok(clean_path(&joined))
 }
 
-/// Normalize a path by removing `.` and `..` components without touching symlinks.
+/// Normalize a path by removing `.` and `..` components without touching
+/// symlinks.
 ///
 /// Preserves the root component and does not pop past it. For example:
 /// - `/foo/../bar` becomes `/bar`
@@ -574,7 +587,8 @@ fn clean_path(path: &Path) -> PathBuf {
                     // Relative path going above starting point - preserve the ..
                     cleaned.push(component);
                 }
-                // If we have a root but depth is 0, ignore the .. (can't go above root)
+                // If we have a root but depth is 0, ignore the .. (can't go
+                // above root)
             }
             Component::RootDir | Component::Prefix(_) => {
                 cleaned.push(component);
@@ -840,8 +854,9 @@ mod tests {
         Ok(())
     }
 
-    /// Verify that SingleCall strategy on macOS preserves symlinks via clonefile(2).
-    /// This documents that the kernel handles symlinks correctly in single-call mode.
+    /// Verify that SingleCall strategy on macOS preserves symlinks via
+    /// clonefile(2). This documents that the kernel handles symlinks
+    /// correctly in single-call mode.
     #[cfg(target_os = "macos")]
     #[test]
     fn single_call_preserves_symlinks() -> Result<()> {

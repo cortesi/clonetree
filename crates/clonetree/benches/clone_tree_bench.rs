@@ -2,8 +2,8 @@
 
 use std::{fs, hint::black_box, path::Path, time::Duration};
 
-use clonetree::{clone_tree, CloneStrategy, Options};
-use criterion::{measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion};
+use clonetree::{CloneStrategy, Options, clone_tree};
+use criterion::{BenchmarkGroup, BenchmarkId, Criterion, measurement::WallTime};
 use tempfile::TempDir;
 
 /// Size in bytes for small benchmark files.

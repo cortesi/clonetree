@@ -14,6 +14,17 @@ members = [
 ]
 resolver = "2"
 
+[workspace.metadata.nanocode]
+schema-version = 1
+requires-nanocode = ">=0.1, <0.2"
+features = "all"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace.dependencies]
 clonetree = { version = "0.0.2", path = "crates/clonetree" }
 

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use clonetree::{clone_tree, CloneStrategy, Options};
+use clonetree::{CloneStrategy, Options, clone_tree};
 
 #[derive(Parser)]
 #[command(
