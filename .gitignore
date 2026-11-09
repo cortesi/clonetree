@@ -4,4 +4,4 @@
 tmp
 .cargo/
 .venv
-plans
+/plans
